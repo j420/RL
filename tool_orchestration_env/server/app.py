@@ -174,6 +174,72 @@ async def run_baseline():
     return {**scores, "status": "completed"}
 
 
+@app.post("/interact")
+async def interact(payload: dict):
+    """Interactive endpoint for the web dashboard. Maintains state between calls."""
+    env = _get_env()
+    action_type = payload.get("action", "")
+
+    if action_type == "reset":
+        task_id = payload.get("task_id", "easy")
+        obs = env.reset(task_id=task_id)
+        return {
+            "observation": {
+                "tool_response": obs.tool_response,
+                "task_description": obs.task_description,
+                "available_tools": obs.available_tools,
+                "workspace": obs.workspace,
+                "step_number": obs.step_number,
+                "max_steps": obs.max_steps,
+            },
+            "reward": 0.0,
+            "done": False,
+        }
+
+    elif action_type == "step":
+        tool_name = payload.get("tool_name", "")
+        method = payload.get("method", "")
+        parameters = payload.get("parameters", {})
+        if isinstance(parameters, str):
+            import json as _json
+            try:
+                parameters = _json.loads(parameters) if parameters.strip() else {}
+            except _json.JSONDecodeError:
+                return {"error": "Invalid JSON in parameters"}
+
+        act = ToolOrchestrationAction(tool_name=tool_name, method=method, parameters=parameters)
+        obs = env.step(act)
+        result = {
+            "observation": {
+                "tool_response": obs.tool_response,
+                "task_description": obs.task_description,
+                "workspace": obs.workspace,
+                "step_number": obs.step_number,
+                "max_steps": obs.max_steps,
+            },
+            "reward": obs.reward,
+            "done": obs.done,
+        }
+        if obs.done:
+            grader = env.get_last_grader_result()
+            if grader:
+                result["grader"] = grader
+        return result
+
+    elif action_type == "state":
+        state = env.state
+        return {
+            "episode_id": state.episode_id,
+            "task_id": state.task_id,
+            "step_count": state.step_count,
+            "total_reward": state.total_reward,
+            "tools_called": state.tools_called,
+            "done": state.done,
+        }
+
+    return {"error": f"Unknown action '{action_type}'. Use 'reset', 'step', or 'state'."}
+
+
 @app.post("/run-tests")
 async def run_tests():
     """Run scripted integration tests on all 3 tasks + edge cases. No LLM needed."""
@@ -304,220 +370,258 @@ async def dashboard():
     return DASHBOARD_HTML
 
 
-DASHBOARD_HTML = """<!DOCTYPE html>
+DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tool Orchestration Environment</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; line-height: 1.6; }
-  .container { max-width: 1100px; margin: 0 auto; padding: 24px; }
-  h1 { font-size: 28px; margin-bottom: 4px; color: #f8fafc; }
-  .subtitle { color: #94a3b8; margin-bottom: 24px; font-size: 15px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-bottom: 24px; }
-  .card { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; }
-  .card h2 { font-size: 16px; color: #38bdf8; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
-  .card h3 { font-size: 14px; color: #94a3b8; margin: 12px 0 6px; text-transform: uppercase; letter-spacing: 0.5px; }
-  .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
-  .badge-easy { background: #065f46; color: #6ee7b7; }
-  .badge-medium { background: #78350f; color: #fbbf24; }
-  .badge-hard { background: #7f1d1d; color: #fca5a5; }
-  .stat-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #334155; font-size: 14px; }
-  .stat-row:last-child { border-bottom: none; }
-  .stat-label { color: #94a3b8; }
-  .stat-value { color: #f8fafc; font-weight: 600; }
-  .tools-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-  .tool-chip { background: #334155; padding: 4px 12px; border-radius: 8px; font-size: 13px; color: #cbd5e1; }
-  .criteria-bar { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 13px; }
-  .criteria-bar .bar-bg { flex: 1; height: 8px; background: #334155; border-radius: 4px; overflow: hidden; }
-  .criteria-bar .bar-fill { height: 100%; background: #38bdf8; border-radius: 4px; }
-  .criteria-bar .weight { color: #94a3b8; min-width: 36px; text-align: right; }
-  button { background: #2563eb; color: white; border: none; padding: 12px 28px; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
-  button:hover { background: #1d4ed8; }
-  button:disabled { background: #475569; cursor: not-allowed; }
-  .btn-row { display: flex; gap: 12px; align-items: center; margin-bottom: 24px; flex-wrap: wrap; }
-  .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-  .dot-green { background: #22c55e; }
-  .dot-red { background: #ef4444; }
-  .dot-gray { background: #64748b; }
-  #results-panel { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; display: none; }
-  #results-panel h2 { font-size: 18px; color: #f8fafc; margin-bottom: 16px; }
-  .score-cards { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
-  .score-card { text-align: center; padding: 16px 24px; background: #0f172a; border-radius: 10px; min-width: 120px; }
-  .score-card .label { font-size: 12px; color: #94a3b8; text-transform: uppercase; }
-  .score-card .value { font-size: 32px; font-weight: 700; margin-top: 4px; }
-  .score-card .value.perfect { color: #22c55e; }
-  .score-card .value.good { color: #38bdf8; }
-  .score-card .value.low { color: #fbbf24; }
-  .test-list { max-height: 400px; overflow-y: auto; }
-  .test-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #1e293b; font-size: 13px; font-family: monospace; }
-  .test-pass { color: #22c55e; }
-  .test-fail { color: #ef4444; }
-  .spinner { display: inline-block; width: 18px; height: 18px; border: 2px solid #475569; border-top-color: #38bdf8; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 8px; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .endpoints { font-size: 13px; font-family: monospace; }
-  .endpoints div { padding: 3px 0; }
-  .method { display: inline-block; width: 44px; font-weight: 700; }
-  .method-get { color: #22c55e; }
-  .method-post { color: #38bdf8; }
-  .method-ws { color: #a78bfa; }
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f172a;color:#e2e8f0;line-height:1.6}
+.container{max-width:1100px;margin:0 auto;padding:20px}
+h1{font-size:26px;color:#f8fafc}
+.about{color:#94a3b8;font-size:14px;margin:8px 0 20px;max-width:800px}
+.about strong{color:#cbd5e1}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+@media(max-width:768px){.grid{grid-template-columns:1fr}}
+.card{background:#1e293b;border-radius:10px;padding:16px;border:1px solid #334155}
+.card h2{font-size:15px;color:#38bdf8;margin-bottom:10px}
+label{display:block;font-size:12px;color:#94a3b8;margin:8px 0 3px;text-transform:uppercase;letter-spacing:.5px}
+select,input,textarea{width:100%;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:8px 10px;font-size:13px;font-family:inherit}
+textarea{font-family:'SF Mono',Consolas,monospace;min-height:60px;resize:vertical}
+select{cursor:pointer}
+.btn{display:inline-block;padding:9px 20px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;border:none;transition:background .15s}
+.btn-blue{background:#2563eb;color:#fff}.btn-blue:hover{background:#1d4ed8}
+.btn-green{background:#059669;color:#fff}.btn-green:hover{background:#047857}
+.btn-gray{background:#334155;color:#cbd5e1}.btn-gray:hover{background:#475569}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-row{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
+.status-bar{display:flex;gap:16px;padding:10px 14px;background:#0f172a;border-radius:8px;font-size:13px;margin-bottom:12px;flex-wrap:wrap;align-items:center}
+.status-bar .item{display:flex;align-items:center;gap:5px}
+.status-bar .val{color:#f8fafc;font-weight:600}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.dot-g{background:#22c55e}.dot-r{background:#ef4444}.dot-y{background:#eab308}.dot-x{background:#475569}
+pre{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:12px;font-size:12px;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-word;color:#cbd5e1;font-family:'SF Mono',Consolas,monospace}
+.history{max-height:260px;overflow-y:auto}
+.h-entry{padding:6px 0;border-bottom:1px solid #1e293b;font-size:12px;font-family:monospace}
+.h-step{color:#38bdf8;font-weight:700;margin-right:4px}
+.h-action{color:#a78bfa}.h-reward{color:#22c55e}
+.grader-row{display:flex;justify-content:space-between;padding:4px 0;font-size:13px;border-bottom:1px solid #334155}
+.grader-row:last-child{border:none}
+.grader-bar{flex:1;height:6px;background:#334155;border-radius:3px;margin:0 10px;overflow:hidden;align-self:center}
+.grader-fill{height:100%;background:#38bdf8;border-radius:3px;transition:width .3s}
+.tools-ref{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.chip{background:#334155;padding:2px 10px;border-radius:6px;font-size:12px;color:#94a3b8;cursor:pointer;transition:background .15s}
+.chip:hover{background:#475569;color:#e2e8f0}
+.score-big{font-size:40px;font-weight:700;text-align:center;padding:10px 0}
+.score-big.s-green{color:#22c55e}.score-big.s-blue{color:#38bdf8}.score-big.s-yellow{color:#eab308}.score-big.s-gray{color:#475569}
 </style>
 </head>
 <body>
 <div class="container">
-  <h1>Tool Orchestration Environment</h1>
-  <p class="subtitle">Multi-tool orchestration RL environment for training AI agents to chain business APIs</p>
+<h1>Tool Orchestration Environment</h1>
+<p class="about">
+An RL environment where AI agents chain <strong>6 simulated business tools</strong> (database, email, filestore, calculator, calendar, validator) to complete multi-step workflows.
+Agents receive a task description, choose which tool to call at each step, and earn rewards based on both <strong>correct tool sequencing</strong> (30%) and <strong>output quality</strong> judged by a deterministic grader (70%).
+Three tasks test increasing difficulty: simple data lookup, multi-step report generation, and a complex scheduling task with deliberate error injection to test resilience.
+</p>
 
-  <div class="btn-row">
-    <button id="run-btn" onclick="runTests()">Run All Tests</button>
-    <button onclick="checkHealth()" style="background:#334155">Check Health</button>
-    <span id="health-status"></span>
-    <span id="run-status" style="font-size:14px; color:#94a3b8;"></span>
-  </div>
+<div class="status-bar">
+  <div class="item"><span class="dot dot-x" id="health-dot"></span> <span id="health-txt">Checking...</span></div>
+  <div class="item">Step: <span class="val" id="st-step">-</span></div>
+  <div class="item">Reward: <span class="val" id="st-reward">-</span></div>
+  <div class="item">Task: <span class="val" id="st-task">-</span></div>
+  <div class="item" id="st-done-wrap" style="display:none"><span class="dot dot-g"></span> <span class="val">Episode Complete</span></div>
+</div>
 
-  <div id="results-panel">
-    <h2>Test Results</h2>
-    <div class="score-cards" id="score-cards"></div>
-    <div id="summary-line" style="margin-bottom:12px; font-size:14px; color:#94a3b8;"></div>
-    <div class="test-list" id="test-list"></div>
-  </div>
-
-  <div class="grid">
-    <div class="card">
-      <h2>Easy Task <span class="badge badge-easy">Easy</span></h2>
-      <p style="font-size:13px; color:#cbd5e1; margin-bottom:12px;">Send welcome emails to all employees hired after 2026-03-01</p>
-      <div class="stat-row"><span class="stat-label">Max Steps</span><span class="stat-value">10</span></div>
-      <div class="stat-row"><span class="stat-label">Tools</span><span class="stat-value">database, email</span></div>
-      <div class="stat-row"><span class="stat-label">Baseline Score</span><span class="stat-value">~0.82</span></div>
-      <h3>Grading Criteria</h3>
-      <div class="criteria-bar"><span style="min-width:120px">correct_recipients</span><div class="bar-bg"><div class="bar-fill" style="width:35%"></div></div><span class="weight">35%</span></div>
-      <div class="criteria-bar"><span style="min-width:120px">correct_query</span><div class="bar-bg"><div class="bar-fill" style="width:25%"></div></div><span class="weight">25%</span></div>
-      <div class="criteria-bar"><span style="min-width:120px">correct_subjects</span><div class="bar-bg"><div class="bar-fill" style="width:20%"></div></div><span class="weight">20%</span></div>
-      <div class="criteria-bar"><span style="min-width:120px">correct_body</span><div class="bar-bg"><div class="bar-fill" style="width:20%"></div></div><span class="weight">20%</span></div>
-    </div>
-
-    <div class="card">
-      <h2>Medium Task <span class="badge badge-medium">Medium</span></h2>
-      <p style="font-size:13px; color:#cbd5e1; margin-bottom:12px;">Generate March 2026 expense report with category totals</p>
-      <div class="stat-row"><span class="stat-label">Max Steps</span><span class="stat-value">15</span></div>
-      <div class="stat-row"><span class="stat-label">Tools</span><span class="stat-value">database, calculator, filestore, email</span></div>
-      <div class="stat-row"><span class="stat-label">Baseline Score</span><span class="stat-value">~0.55</span></div>
-      <h3>Grading Criteria</h3>
-      <div class="criteria-bar"><span style="min-width:120px">correct_report</span><div class="bar-bg"><div class="bar-fill" style="width:25%"></div></div><span class="weight">25%</span></div>
-      <div class="criteria-bar"><span style="min-width:120px">correct_calculation</span><div class="bar-bg"><div class="bar-fill" style="width:20%"></div></div><span class="weight">20%</span></div>
-      <div class="criteria-bar"><span style="min-width:120px">correct_email</span><div class="bar-bg"><div class="bar-fill" style="width:20%"></div></div><span class="weight">20%</span></div>
-      <div class="criteria-bar"><span style="min-width:120px">completeness</span><div class="bar-bg"><div class="bar-fill" style="width:20%"></div></div><span class="weight">20%</span></div>
-      <div class="criteria-bar"><span style="min-width:120px">correct_query</span><div class="bar-bg"><div class="bar-fill" style="width:15%"></div></div><span class="weight">15%</span></div>
-    </div>
-
-    <div class="card">
-      <h2>Hard Task <span class="badge badge-hard">Hard</span></h2>
-      <p style="font-size:13px; color:#cbd5e1; margin-bottom:12px;">Schedule Q2 review meeting with error handling for unavailable calendars</p>
-      <div class="stat-row"><span class="stat-label">Max Steps</span><span class="stat-value">20</span></div>
-      <div class="stat-row"><span class="stat-label">Tools</span><span class="stat-value">database, calendar, filestore, email</span></div>
-      <div class="stat-row"><span class="stat-label">Baseline Score</span><span class="stat-value">~0.22</span></div>
-      <h3>Grading Criteria</h3>
-      <div class="criteria-bar"><span style="min-width:120px">calendar_check</span><div class="bar-bg"><div class="bar-fill" style="width:15%"></div></div><span class="weight">15%</span></div>
-      <div class="criteria-bar"><span style="min-width:120px">error_handling</span><div class="bar-bg"><div class="bar-fill" style="width:15%"></div></div><span class="weight">15%</span></div>
-      <div class="criteria-bar"><span style="min-width:120px">meeting_created</span><div class="bar-bg"><div class="bar-fill" style="width:15%"></div></div><span class="weight">15%</span></div>
-      <div class="criteria-bar"><span style="min-width:120px">email_sent</span><div class="bar-bg"><div class="bar-fill" style="width:15%"></div></div><span class="weight">15%</span></div>
-      <div class="criteria-bar"><span style="min-width:120px">project + team</span><div class="bar-bg"><div class="bar-fill" style="width:20%"></div></div><span class="weight">20%</span></div>
-      <div class="criteria-bar"><span style="min-width:120px">agenda + edge</span><div class="bar-bg"><div class="bar-fill" style="width:20%"></div></div><span class="weight">20%</span></div>
-    </div>
-  </div>
-
-  <div class="grid">
-    <div class="card">
-      <h2>Available Tools</h2>
-      <div class="tools-list">
-        <span class="tool-chip">database</span>
-        <span class="tool-chip">email</span>
-        <span class="tool-chip">filestore</span>
-        <span class="tool-chip">calculator</span>
-        <span class="tool-chip">calendar</span>
-        <span class="tool-chip">validator</span>
+<div class="grid">
+  <!-- Left: Controls -->
+  <div>
+    <div class="card" style="margin-bottom:16px">
+      <h2>1. Start Episode</h2>
+      <label>Task</label>
+      <select id="task-select">
+        <option value="easy">Easy &mdash; Welcome Emails (10 steps)</option>
+        <option value="medium">Medium &mdash; Expense Report (15 steps)</option>
+        <option value="hard">Hard &mdash; Schedule Meeting (20 steps)</option>
+      </select>
+      <div class="btn-row">
+        <button class="btn btn-green" onclick="doReset()">Reset Environment</button>
+        <button class="btn btn-gray" onclick="runAutoTests()">Run Automated Tests</button>
       </div>
-      <h3>Reward Formula</h3>
-      <div style="font-size:13px; color:#cbd5e1; margin-top:8px;">
-        <code style="color:#38bdf8">final = step_progress * 0.3 + grader_score * 0.7</code>
-        <div style="margin-top:6px; color:#94a3b8;">Per-step: +0.10 sequence match, +0.05 success, -0.05 duplicate, -0.10 invalid tool</div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <h2>2. Execute Actions</h2>
+      <label>Tool</label>
+      <select id="tool-select" onchange="updateMethods()">
+        <option value="database">database</option>
+        <option value="email">email</option>
+        <option value="filestore">filestore</option>
+        <option value="calculator">calculator</option>
+        <option value="calendar">calendar</option>
+        <option value="validator">validator</option>
+      </select>
+      <label>Method</label>
+      <select id="method-select"></select>
+      <label>Parameters (JSON)</label>
+      <textarea id="params-input" placeholder='{"sql": "SELECT * FROM employees"}'></textarea>
+      <div class="btn-row">
+        <button class="btn btn-blue" onclick="doStep()" id="step-btn">Execute Step</button>
       </div>
     </div>
 
     <div class="card">
-      <h2>API Endpoints</h2>
-      <div class="endpoints">
-        <div><span class="method method-get">GET</span> /health</div>
-        <div><span class="method method-get">GET</span> /tasks</div>
-        <div><span class="method method-get">GET</span> /schema</div>
-        <div><span class="method method-get">GET</span> /state</div>
-        <div><span class="method method-post">POST</span> /reset</div>
-        <div><span class="method method-post">POST</span> /step</div>
-        <div><span class="method method-post">POST</span> /grader</div>
-        <div><span class="method method-post">POST</span> /run-tests</div>
-        <div><span class="method method-ws">WS</span> /ws</div>
-      </div>
+      <h2>Tool Reference</h2>
+      <div style="font-size:12px;color:#94a3b8;margin-bottom:6px">Click a tool to populate the form above</div>
+      <div id="tool-ref"></div>
+    </div>
+  </div>
+
+  <!-- Right: Output -->
+  <div>
+    <div class="card" style="margin-bottom:16px">
+      <h2>Task Description</h2>
+      <div id="task-desc" style="font-size:13px;color:#cbd5e1;min-height:40px">Reset an environment to see the task.</div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <h2>Tool Response</h2>
+      <pre id="response-output">No response yet. Reset an environment and execute a step.</pre>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <h2>Episode History</h2>
+      <div class="history" id="history-list"><div style="color:#475569;font-size:13px">No steps yet.</div></div>
+    </div>
+
+    <div class="card" id="grader-card" style="display:none">
+      <h2>Grader Results</h2>
+      <div class="score-big s-gray" id="grader-score">-</div>
+      <div id="grader-breakdown"></div>
     </div>
   </div>
 </div>
+</div>
 
 <script>
-async function checkHealth() {
-  const el = document.getElementById('health-status');
+const TOOLS = {
+  database: {methods: [{n:'query',p:'{"sql": "SELECT * FROM employees WHERE hire_date > \'2026-03-01\'"}'},{n:'insert',p:'{"table": "employees", "data": {"name": "Test"}}'}]},
+  email: {methods: [{n:'send',p:'{"to": "user@acme.com", "subject": "Hello", "body": "Hi there"}'},{n:'search',p:'{"query": "expense"}'},{n:'list_inbox',p:'{}'}]},
+  filestore: {methods: [{n:'read',p:'{"path": "projects/q1-review.md"}'},{n:'write',p:'{"path": "output.md", "content": "# Report"}'},{n:'list',p:'{"directory": ""}'}]},
+  calculator: {methods: [{n:'compute',p:'{"expression": "sqrt(144) + 10"}'},{n:'group_sum',p:'{"data": [{"cat": "A", "amt": 100}], "group_by": "cat", "aggregate": "amt"}'},{n:'date_diff',p:'{"date1": "2026-01-01", "date2": "2026-04-01"}'}]},
+  calendar: {methods: [{n:'get_events',p:'{"user": "user_01", "date_range": {"start": "2026-04-01", "end": "2026-04-07"}}'},{n:'find_free_slots',p:'{"users": ["user_01","user_02"], "date_range": {"start": "2026-04-01", "end": "2026-04-07"}, "duration_minutes": 60}'},{n:'create_event',p:'{"title": "Meeting", "attendees": ["user_01"], "start": "2026-04-03T10:00", "end": "2026-04-03T11:00"}'}]},
+  validator: {methods: [{n:'validate',p:'{"data": {"to": "x@y.com", "subject": "Hi", "body": "Hello"}, "schema_name": "email_format"}'}]}
+};
+let history = [];
+
+function updateMethods() {
+  const tool = document.getElementById('tool-select').value;
+  const sel = document.getElementById('method-select');
+  sel.innerHTML = TOOLS[tool].methods.map(m => `<option value="${m.n}">${m.n}</option>`).join('');
+  document.getElementById('params-input').value = TOOLS[tool].methods[0].p;
+}
+
+function fillTool(tool, method) {
+  document.getElementById('tool-select').value = tool;
+  updateMethods();
+  const ms = TOOLS[tool].methods;
+  const m = ms.find(x => x.n === method) || ms[0];
+  document.getElementById('method-select').value = m.n;
+  document.getElementById('params-input').value = m.p;
+}
+
+// Build tool reference
+(function(){
+  let html = '';
+  for (const [t, info] of Object.entries(TOOLS)) {
+    html += `<div style="margin-bottom:6px"><strong style="color:#cbd5e1;font-size:13px">${t}</strong><div class="tools-ref">`;
+    for (const m of info.methods) html += `<span class="chip" onclick="fillTool('${t}','${m.n}')">${m.n}</span>`;
+    html += '</div></div>';
+  }
+  document.getElementById('tool-ref').innerHTML = html;
+  updateMethods();
+})();
+
+async function api(body) {
+  const r = await fetch('/interact', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  return r.json();
+}
+
+async function doReset() {
+  const task = document.getElementById('task-select').value;
+  history = [];
+  document.getElementById('history-list').innerHTML = '<div style="color:#475569;font-size:13px">No steps yet.</div>';
+  document.getElementById('grader-card').style.display = 'none';
+  document.getElementById('st-done-wrap').style.display = 'none';
+  const d = await api({action: 'reset', task_id: task});
+  document.getElementById('task-desc').textContent = d.observation.task_description;
+  document.getElementById('response-output').textContent = JSON.stringify(d.observation.tool_response, null, 2);
+  document.getElementById('st-step').textContent = `0/${d.observation.max_steps}`;
+  document.getElementById('st-reward').textContent = '0.0000';
+  document.getElementById('st-task').textContent = task;
+  document.getElementById('step-btn').disabled = false;
+}
+
+async function doStep() {
+  const tool = document.getElementById('tool-select').value;
+  const method = document.getElementById('method-select').value;
+  let params = document.getElementById('params-input').value.trim();
+  try { params = params ? JSON.parse(params) : {}; } catch(e) { alert('Invalid JSON in parameters'); return; }
+
+  const d = await api({action: 'step', tool_name: tool, method: method, parameters: params});
+  if (d.error) { document.getElementById('response-output').textContent = 'Error: ' + d.error; return; }
+
+  const obs = d.observation;
+  document.getElementById('response-output').textContent = JSON.stringify(obs.tool_response, null, 2);
+  document.getElementById('st-step').textContent = `${obs.step_number}/${obs.max_steps}`;
+  document.getElementById('st-reward').textContent = (d.reward || 0).toFixed(4);
+
+  history.push({tool, method, reward: d.reward, done: d.done});
+  let hhtml = '';
+  history.forEach((h, i) => {
+    hhtml += `<div class="h-entry"><span class="h-step">[${i+1}]</span> <span class="h-action">${h.tool}.${h.method}</span> <span class="h-reward">reward=${(h.reward||0).toFixed(4)}</span>${h.done ? ' <span style="color:#22c55e">DONE</span>' : ''}</div>`;
+  });
+  document.getElementById('history-list').innerHTML = hhtml;
+
+  if (d.done) {
+    document.getElementById('st-done-wrap').style.display = 'flex';
+    document.getElementById('step-btn').disabled = true;
+    if (d.grader) {
+      const gc = document.getElementById('grader-card');
+      gc.style.display = 'block';
+      const sc = d.grader.score;
+      const cls = sc >= 0.9 ? 's-green' : sc >= 0.5 ? 's-blue' : sc > 0 ? 's-yellow' : 's-gray';
+      document.getElementById('grader-score').className = 'score-big ' + cls;
+      document.getElementById('grader-score').textContent = sc.toFixed(4);
+      let bhtml = '';
+      for (const [k, v] of Object.entries(d.grader.breakdown || {})) {
+        const pct = (v * 100).toFixed(0);
+        bhtml += `<div class="grader-row"><span style="min-width:140px">${k}</span><div class="grader-bar"><div class="grader-fill" style="width:${pct}%"></div></div><span style="min-width:40px;text-align:right;color:#f8fafc">${v.toFixed(2)}</span></div>`;
+      }
+      document.getElementById('grader-breakdown').innerHTML = bhtml;
+    }
+  }
+}
+
+async function runAutoTests() {
+  document.getElementById('response-output').textContent = 'Running automated tests...';
+  const r = await fetch('/run-tests', {method:'POST'});
+  const d = await r.json();
+  let txt = `=== ${d.summary.passed}/${d.summary.total} PASSED (${d.summary.elapsed_seconds}s) ===\n`;
+  txt += `Easy: ${d.summary.scores.easy}  Medium: ${d.summary.scores.medium}  Hard: ${d.summary.scores.hard}\n\n`;
+  d.tests.forEach(t => { txt += `${t.status === 'PASS' ? 'PASS' : 'FAIL'}  ${t.name}${t.detail ? '  ('+t.detail+')' : ''}\n`; });
+  document.getElementById('response-output').textContent = txt;
+}
+
+// Health check on load
+(async()=>{
   try {
     const r = await fetch('/health');
-    const d = await r.json();
-    el.innerHTML = '<span class="status-dot dot-green"></span> Healthy';
-  } catch(e) {
-    el.innerHTML = '<span class="status-dot dot-red"></span> Unreachable';
-  }
-}
-
-async function runTests() {
-  const btn = document.getElementById('run-btn');
-  const status = document.getElementById('run-status');
-  const panel = document.getElementById('results-panel');
-  btn.disabled = true;
-  status.innerHTML = '<span class="spinner"></span>Running tests...';
-  panel.style.display = 'block';
-  document.getElementById('score-cards').innerHTML = '';
-  document.getElementById('test-list').innerHTML = '';
-  document.getElementById('summary-line').innerHTML = '';
-
-  try {
-    const r = await fetch('/run-tests', {method: 'POST'});
-    const d = await r.json();
-    const s = d.summary;
-    const scores = s.scores;
-
-    function scoreClass(v) { return v >= 1.0 ? 'perfect' : v >= 0.5 ? 'good' : 'low'; }
-
-    document.getElementById('score-cards').innerHTML = `
-      <div class="score-card"><div class="label">Easy</div><div class="value ${scoreClass(scores.easy)}">${scores.easy.toFixed(2)}</div></div>
-      <div class="score-card"><div class="label">Medium</div><div class="value ${scoreClass(scores.medium)}">${scores.medium.toFixed(2)}</div></div>
-      <div class="score-card"><div class="label">Hard</div><div class="value ${scoreClass(scores.hard)}">${scores.hard.toFixed(2)}</div></div>
-      <div class="score-card"><div class="label">Tests</div><div class="value ${s.failed === 0 ? 'perfect' : 'low'}">${s.passed}/${s.total}</div></div>
-    `;
-
-    document.getElementById('summary-line').innerHTML =
-      `${s.passed}/${s.total} passed in ${s.elapsed_seconds}s` +
-      (s.failed === 0 ? ' &mdash; <span style="color:#22c55e">ALL TESTS PASSED</span>' : ` &mdash; <span style="color:#ef4444">${s.failed} FAILED</span>`);
-
-    document.getElementById('test-list').innerHTML = d.tests.map(t =>
-      `<div class="test-item"><span class="${t.status === 'PASS' ? 'test-pass' : 'test-fail'}">${t.status === 'PASS' ? '✓' : '✗'}</span> ${t.name}${t.detail ? ' <span style="color:#64748b">(' + t.detail + ')</span>' : ''}</div>`
-    ).join('');
-
-    status.innerHTML = '';
-  } catch(e) {
-    status.innerHTML = '<span style="color:#ef4444">Error: ' + e.message + '</span>';
-  }
-  btn.disabled = false;
-}
-
-// Auto-check health on load
-checkHealth();
+    if (r.ok) { document.getElementById('health-dot').className='dot dot-g'; document.getElementById('health-txt').textContent='Healthy'; }
+  } catch(e) { document.getElementById('health-dot').className='dot dot-r'; document.getElementById('health-txt').textContent='Unreachable'; }
+})();
 </script>
 </body>
 </html>"""
