@@ -1,0 +1,38 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openenv-tool_orchestration_env"
+version = "0.1.0"
+description = "Tool Orchestration Env environment for OpenEnv"
+requires-python = ">=3.10"
+dependencies = [
+    # Core OpenEnv runtime (provides FastAPI server + HTTP client types)
+    # install from github
+    # "openenv-core[core] @ git+https://github.com/meta-pytorch/OpenEnv.git",
+    "openenv-core[core]>=0.2.2",
+    "openai>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.scripts]
+# Server entry point - enables running via: uv run --project . server
+# or: python -m tool_orchestration_env.server.app
+server = "tool_orchestration_env.server.app:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["tool_orchestration_env", "tool_orchestration_env.server", "tool_orchestration_env.server.tools"]
+package-dir = { "tool_orchestration_env" = ".", "tool_orchestration_env.server" = "server", "tool_orchestration_env.server.tools" = "server/tools" }
