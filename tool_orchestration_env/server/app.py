@@ -92,20 +92,16 @@ def _interpret_nl(text: str, task_description: str = "") -> dict:
     if not hf_token:
         raise ValueError("HF_TOKEN not configured. Set it in your Space secrets.")
 
-    api_base = os.environ.get("API_BASE_URL", "")
     model = os.environ.get("MODEL_NAME", "") or _DEFAULT_HF_MODEL
 
-    if not api_base:
-        api_base = "https://router.huggingface.co/v1"
-
-    from openai import OpenAI
-    client = OpenAI(base_url=api_base, api_key=hf_token)
+    from huggingface_hub import InferenceClient
+    client = InferenceClient(provider="auto", api_key=hf_token)
 
     user_msg = text
     if task_description:
         user_msg = f"Current task: {task_description}\n\nUser request: {text}"
 
-    response = client.chat.completions.create(
+    response = client.chat_completion(
         model=model,
         messages=[
             {"role": "system", "content": _NL_SYSTEM_PROMPT},
@@ -295,11 +291,8 @@ async def interact(payload: dict):
         except ValueError as e:
             return {"error": str(e)}
         except Exception as e:
-            err_msg = str(e)
-            # Include details for debugging
             model_used = os.environ.get("MODEL_NAME", "") or _DEFAULT_HF_MODEL
-            api_used = os.environ.get("API_BASE_URL", "") or "https://router.huggingface.co/v1"
-            return {"error": f"LLM error: {err_msg} [model={model_used}, api={api_used}]"}
+            return {"error": f"LLM error: {e} [model={model_used}]"}
 
         act = ToolOrchestrationAction(tool_name=tool_name, method=method, parameters=parameters)
         obs = env.step(act)
