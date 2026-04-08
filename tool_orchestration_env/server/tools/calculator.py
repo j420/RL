@@ -5,6 +5,7 @@ No external dependencies — uses only Python stdlib.
 """
 
 import math
+import re
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -56,6 +57,21 @@ class CalculatorTool:
         expression = params.get("expression", "")
         if not expression:
             return {"error": "Missing required parameter 'expression'"}
+
+        # Block dunder attribute access patterns that could escape the sandbox
+        if re.search(r'__\w+__', expression) or '..' in expression:
+            return {"error": "Expression contains forbidden patterns"}
+
+        # Block dangerous builtin names
+        _FORBIDDEN = {
+            'getattr', 'setattr', 'delattr', 'exec', 'eval', 'import',
+            '__import__', 'open', 'type', 'vars', 'dir', 'globals', 'locals',
+            'compile', 'breakpoint',
+        }
+        tokens = set(re.findall(r'[a-zA-Z_]\w*', expression))
+        forbidden_found = tokens & _FORBIDDEN
+        if forbidden_found:
+            return {"error": f"Expression contains forbidden names: {forbidden_found}"}
 
         try:
             # Evaluate with only safe builtins

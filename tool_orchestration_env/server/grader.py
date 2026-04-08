@@ -370,6 +370,13 @@ class Grader:
                     if i < len(history) - 1:
                         proceeded_after_error = True
 
+                # Also detect find_free_slots handling user_03 internally
+                # (returns unavailable_users instead of raising an error)
+                if action.get("method") == "find_free_slots":
+                    unavailable = result.get("unavailable_users", [])
+                    if "user_03" in unavailable:
+                        proceeded_after_error = True
+
         if proceeded_after_error:
             error_score = 0.7
             if user_03_attempts <= 2:  # Didn't infinite-retry

@@ -6,8 +6,8 @@ Uses an OpenAI-compatible LLM to solve all 3 tasks (easy, medium, hard).
 Reads configuration from environment variables:
     - API_BASE_URL: LLM API base URL (e.g., https://api.openai.com/v1)
     - MODEL_NAME: Model to use (e.g., gpt-4o-mini)
-    - HF_TOKEN: API key / HF token
-    - ENV_URL: Environment server URL (default: http://localhost:8000)
+    - OPENAI_API_KEY: API key (preferred) — also accepts HF_TOKEN as fallback
+    - ENV_URL: Environment server URL (default: http://localhost:7860)
 """
 
 import json
@@ -161,15 +161,15 @@ def main():
     # Read config from environment
     api_base = os.environ.get("API_BASE_URL", "")
     model_name = os.environ.get("MODEL_NAME", "gpt-4o-mini")
-    hf_token = os.environ.get("HF_TOKEN", "")
-    env_url = os.environ.get("ENV_URL", "http://localhost:8000")
+    api_key = os.environ.get("OPENAI_API_KEY", "") or os.environ.get("HF_TOKEN", "")
+    env_url = os.environ.get("ENV_URL", "http://localhost:7860")
 
-    if not api_base or not hf_token:
-        print("Error: API_BASE_URL and HF_TOKEN environment variables are required.")
+    if not api_base or not api_key:
+        print("Error: API_BASE_URL and API key environment variables are required.")
         print("Usage:")
         print("  export API_BASE_URL=https://api.openai.com/v1")
         print("  export MODEL_NAME=gpt-4o-mini")
-        print("  export HF_TOKEN=your_api_key")
+        print("  export OPENAI_API_KEY=your_api_key  # or HF_TOKEN")
         print("  python inference.py")
         sys.exit(1)
 
@@ -180,7 +180,7 @@ def main():
     print()
 
     # Initialize LLM client
-    llm_client = OpenAI(base_url=api_base, api_key=hf_token)
+    llm_client = OpenAI(base_url=api_base, api_key=api_key)
 
     # Connect to environment via WebSocket
     env_client = ToolOrchestrationEnv(base_url=env_url)

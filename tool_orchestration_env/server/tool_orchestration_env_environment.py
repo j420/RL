@@ -67,6 +67,8 @@ class ToolOrchestrationEnvironment(Environment):
         self._tools_called: List[str] = []
         self._graded: bool = False
         self._last_grader_result: Optional[Dict[str, Any]] = None
+        self._max_possible_step_reward: float = 1.0
+        self._grader_score: float = 0.0
 
     def reset(
         self,
@@ -102,6 +104,8 @@ class ToolOrchestrationEnvironment(Environment):
         self._tools_called = []
         self._graded = False
         self._last_grader_result = None
+        self._grader_score = 0.0
+        self._max_possible_step_reward = len(self._task.optimal_tool_sequence) * 0.15
 
         return ToolOrchestrationObservation(
             tool_response={"message": "Environment ready. Complete the task described below."},
@@ -145,6 +149,10 @@ class ToolOrchestrationEnvironment(Environment):
             self._step_count += 1
             self._total_reward -= 0.1
             self._tools_called.append(action.tool_name)
+            self._episode_history.append({
+                "action": {"tool_name": action.tool_name, "method": action.method, "parameters": action.parameters},
+                "result": {"error": f"Unknown tool '{action.tool_name}'. Available: {TOOL_NAMES}"},
+            })
 
             if self._step_count >= self._task.max_steps:
                 self._done = True
@@ -326,10 +334,20 @@ class ToolOrchestrationEnvironment(Environment):
             **grader_result,
         }
 
-        # Completion bonus
-        completion_bonus = grader_result["score"] * 0.5
-        self._total_reward += completion_bonus
+        # Store grader score for the normalized reward formula
+        self._grader_score = grader_result["score"]
 
     def _normalize_reward(self) -> float:
-        """Normalize total reward to 0.0-1.0 range."""
-        return round(max(0.0, min(1.0, self._total_reward)), 4)
+        """Normalize total reward to 0.0-1.0 range.
+
+        Formula: step_fraction * 0.3 + grader_score * 0.7
+        - step_fraction: how well the agent followed the optimal tool sequence (0-1)
+        - grader_score: content quality from deterministic grader (0-1, only after grading)
+
+        This ensures the grader's quality assessment dominates the reward signal,
+        while per-step progress still provides useful intermediate feedback.
+        """
+        step_fraction = min(1.0, max(0.0, self._total_reward / max(self._max_possible_step_reward, 0.01)))
+        if self._graded:
+            return round(step_fraction * 0.3 + self._grader_score * 0.7, 4)
+        return round(step_fraction * 0.3, 4)
