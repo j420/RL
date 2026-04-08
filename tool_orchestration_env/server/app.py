@@ -83,7 +83,7 @@ _NL_SYSTEM_PROMPT = (
     "No explanation. No markdown. Just the JSON object."
 )
 
-_DEFAULT_HF_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+_DEFAULT_HF_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 
 
 def _interpret_nl(text: str, task_description: str = "") -> dict:
