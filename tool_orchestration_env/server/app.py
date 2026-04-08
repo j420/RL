@@ -327,22 +327,12 @@ Three tasks test increasing difficulty: simple data lookup, multi-step report ge
     </div>
 
     <div class="card" style="margin-bottom:16px">
-      <h2>2. Execute Actions</h2>
-      <label>Tool</label>
-      <select id="tool-select" onchange="updateMethods()">
-        <option value="database">database</option>
-        <option value="email">email</option>
-        <option value="filestore">filestore</option>
-        <option value="calculator">calculator</option>
-        <option value="calendar">calendar</option>
-        <option value="validator">validator</option>
-      </select>
-      <label>Method</label>
-      <select id="method-select"></select>
-      <label>Parameters (JSON)</label>
-      <textarea id="params-input" placeholder='{"sql": "SELECT * FROM employees"}'></textarea>
+      <h2>2. Execute Action</h2>
+      <label>Action (JSON)</label>
+      <textarea id="action-input" rows="5" placeholder='{"tool_name": "database", "method": "query", "parameters": {"sql": "SELECT * FROM employees"}}'></textarea>
+      <div style="font-size:11px;color:#64748b;margin-top:4px">Enter a JSON object with <code>tool_name</code>, <code>method</code>, and <code>parameters</code>. Click a tool below to see an example.</div>
       <div class="btn-row">
-        <button class="btn btn-blue" onclick="doStep()" id="step-btn">Execute Step</button>
+        <button class="btn btn-blue" onclick="doStep()" id="step-btn">Submit</button>
       </div>
     </div>
 
@@ -380,42 +370,44 @@ Three tasks test increasing difficulty: simple data lookup, multi-step report ge
 </div>
 
 <script>
-const TOOLS = {
-  database: {methods: [{n:'query',p:'{"sql": "SELECT * FROM employees WHERE hire_date > \'2026-03-01\'"}'},{n:'insert',p:'{"table": "employees", "data": {"name": "Test"}}'}]},
-  email: {methods: [{n:'send',p:'{"to": "user@acme.com", "subject": "Hello", "body": "Hi there"}'},{n:'search',p:'{"query": "expense"}'},{n:'list_inbox',p:'{}'}]},
-  filestore: {methods: [{n:'read',p:'{"path": "projects/q1-review.md"}'},{n:'write',p:'{"path": "output.md", "content": "# Report"}'},{n:'list',p:'{"directory": ""}'}]},
-  calculator: {methods: [{n:'compute',p:'{"expression": "sqrt(144) + 10"}'},{n:'group_sum',p:'{"data": [{"cat": "A", "amt": 100}], "group_by": "cat", "aggregate": "amt"}'},{n:'date_diff',p:'{"date1": "2026-01-01", "date2": "2026-04-01"}'}]},
-  calendar: {methods: [{n:'get_events',p:'{"user": "user_01", "date_range": {"start": "2026-04-01", "end": "2026-04-07"}}'},{n:'find_free_slots',p:'{"users": ["user_01","user_02"], "date_range": {"start": "2026-04-01", "end": "2026-04-07"}, "duration_minutes": 60}'},{n:'create_event',p:'{"title": "Meeting", "attendees": ["user_01"], "start": "2026-04-03T10:00", "end": "2026-04-03T11:00"}'}]},
-  validator: {methods: [{n:'validate',p:'{"data": {"to": "x@y.com", "subject": "Hi", "body": "Hello"}, "schema_name": "email_format"}'}]}
+const EXAMPLES = {
+  'database.query': {"tool_name":"database","method":"query","parameters":{"sql":"SELECT * FROM employees WHERE hire_date > '2026-03-01'"}},
+  'database.insert': {"tool_name":"database","method":"insert","parameters":{"table":"employees","data":{"name":"Test"}}},
+  'email.send': {"tool_name":"email","method":"send","parameters":{"to":"user@acme.com","subject":"Hello","body":"Hi there"}},
+  'email.search': {"tool_name":"email","method":"search","parameters":{"query":"expense"}},
+  'email.list_inbox': {"tool_name":"email","method":"list_inbox","parameters":{}},
+  'filestore.read': {"tool_name":"filestore","method":"read","parameters":{"path":"projects/q1-review.md"}},
+  'filestore.write': {"tool_name":"filestore","method":"write","parameters":{"path":"output.md","content":"# Report"}},
+  'filestore.list': {"tool_name":"filestore","method":"list","parameters":{"directory":""}},
+  'calculator.compute': {"tool_name":"calculator","method":"compute","parameters":{"expression":"sqrt(144) + 10"}},
+  'calculator.group_sum': {"tool_name":"calculator","method":"group_sum","parameters":{"data":[{"cat":"A","amt":100}],"group_by":"cat","aggregate":"amt"}},
+  'calculator.date_diff': {"tool_name":"calculator","method":"date_diff","parameters":{"date1":"2026-01-01","date2":"2026-04-01"}},
+  'calendar.get_events': {"tool_name":"calendar","method":"get_events","parameters":{"user":"user_01","date_range":{"start":"2026-04-01","end":"2026-04-07"}}},
+  'calendar.find_free_slots': {"tool_name":"calendar","method":"find_free_slots","parameters":{"users":["user_01","user_02"],"date_range":{"start":"2026-04-01","end":"2026-04-07"},"duration_minutes":60}},
+  'calendar.create_event': {"tool_name":"calendar","method":"create_event","parameters":{"title":"Meeting","attendees":["user_01"],"start":"2026-04-03T10:00","end":"2026-04-03T11:00"}},
+  'validator.validate': {"tool_name":"validator","method":"validate","parameters":{"data":{"to":"x@y.com","subject":"Hi","body":"Hello"},"schema_name":"email_format"}}
 };
 let history = [];
 
-function updateMethods() {
-  const tool = document.getElementById('tool-select').value;
-  const sel = document.getElementById('method-select');
-  sel.innerHTML = TOOLS[tool].methods.map(m => `<option value="${m.n}">${m.n}</option>`).join('');
-  document.getElementById('params-input').value = TOOLS[tool].methods[0].p;
-}
-
-function fillTool(tool, method) {
-  document.getElementById('tool-select').value = tool;
-  updateMethods();
-  const ms = TOOLS[tool].methods;
-  const m = ms.find(x => x.n === method) || ms[0];
-  document.getElementById('method-select').value = m.n;
-  document.getElementById('params-input').value = m.p;
+function fillExample(key) {
+  document.getElementById('action-input').value = JSON.stringify(EXAMPLES[key], null, 2);
 }
 
 // Build tool reference
 (function(){
+  const tools = {};
+  for (const key of Object.keys(EXAMPLES)) {
+    const [t, m] = key.split('.');
+    if (!tools[t]) tools[t] = [];
+    tools[t].push({m, key});
+  }
   let html = '';
-  for (const [t, info] of Object.entries(TOOLS)) {
+  for (const [t, ms] of Object.entries(tools)) {
     html += `<div style="margin-bottom:6px"><strong style="color:#cbd5e1;font-size:13px">${t}</strong><div class="tools-ref">`;
-    for (const m of info.methods) html += `<span class="chip" onclick="fillTool('${t}','${m.n}')">${m.n}</span>`;
+    for (const {m, key} of ms) html += `<span class="chip" onclick="fillExample('${key}')">${m}</span>`;
     html += '</div></div>';
   }
   document.getElementById('tool-ref').innerHTML = html;
-  updateMethods();
 })();
 
 async function api(body) {
@@ -439,10 +431,13 @@ async function doReset() {
 }
 
 async function doStep() {
-  const tool = document.getElementById('tool-select').value;
-  const method = document.getElementById('method-select').value;
-  let params = document.getElementById('params-input').value.trim();
-  try { params = params ? JSON.parse(params) : {}; } catch(e) { alert('Invalid JSON in parameters'); return; }
+  const raw = document.getElementById('action-input').value.trim();
+  if (!raw) { alert('Enter a JSON action'); return; }
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch(e) { alert('Invalid JSON: ' + e.message); return; }
+  const tool = parsed.tool_name || '';
+  const method = parsed.method || '';
+  const params = parsed.parameters || {};
 
   const d = await api({action: 'step', tool_name: tool, method: method, parameters: params});
   if (d.error) { document.getElementById('response-output').textContent = 'Error: ' + d.error; return; }
