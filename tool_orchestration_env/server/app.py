@@ -358,7 +358,9 @@ select{cursor:pointer}
 .btn{display:inline-block;padding:9px 20px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;border:none;transition:background .15s}
 .btn-blue{background:#2563eb;color:#fff}.btn-blue:hover{background:#1d4ed8}
 .btn-green{background:#059669;color:#fff}.btn-green:hover{background:#047857}
+.btn-orange{background:#d97706;color:#fff}.btn-orange:hover{background:#b45309}
 .btn-gray{background:#334155;color:#cbd5e1}.btn-gray:hover{background:#475569}
+.btn-sm{padding:6px 14px;font-size:12px}
 .btn:disabled{opacity:.5;cursor:not-allowed}
 .btn-row{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
 .status-bar{display:flex;gap:16px;padding:10px 14px;background:#0f172a;border-radius:8px;font-size:13px;margin-bottom:12px;flex-wrap:wrap;align-items:center}
@@ -375,11 +377,9 @@ pre{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:12px;f
 .grader-row:last-child{border:none}
 .grader-bar{flex:1;height:6px;background:#334155;border-radius:3px;margin:0 10px;overflow:hidden;align-self:center}
 .grader-fill{height:100%;background:#38bdf8;border-radius:3px;transition:width .3s}
-.tools-ref{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
-.chip{background:#334155;padding:2px 10px;border-radius:6px;font-size:12px;color:#94a3b8;cursor:pointer;transition:background .15s}
-.chip:hover{background:#475569;color:#e2e8f0}
 .score-big{font-size:40px;font-weight:700;text-align:center;padding:10px 0}
 .score-big.s-green{color:#22c55e}.score-big.s-blue{color:#38bdf8}.score-big.s-yellow{color:#eab308}.score-big.s-gray{color:#475569}
+.demo-status{font-size:12px;color:#94a3b8;margin-top:6px;min-height:18px}
 </style>
 </head>
 <body>
@@ -413,22 +413,43 @@ Three tasks test increasing difficulty: simple data lookup, multi-step report ge
       <div class="btn-row">
         <button class="btn btn-green" onclick="doReset()">Reset Environment</button>
       </div>
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid #334155">
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:6px">Or auto-play the optimal sequence:</div>
+        <div class="btn-row" style="margin-top:4px">
+          <button class="btn btn-orange btn-sm" onclick="runDemo('easy')" id="demo-easy-btn">Demo Easy</button>
+          <button class="btn btn-orange btn-sm" onclick="runDemo('medium')" id="demo-medium-btn">Demo Medium</button>
+          <button class="btn btn-orange btn-sm" onclick="runDemo('hard')" id="demo-hard-btn">Demo Hard</button>
+        </div>
+        <div class="demo-status" id="demo-status"></div>
+      </div>
     </div>
 
     <div class="card" style="margin-bottom:16px">
-      <h2>2. Tell the Agent What to Do</h2>
-      <label>Your instruction</label>
-      <input type="text" id="nl-input" placeholder="e.g. look up all employees in the database" autocomplete="off">
-      <div style="font-size:11px;color:#64748b;margin-top:4px">Type in plain English. An LLM will interpret your instruction into a tool call.</div>
+      <h2>2. Execute Action</h2>
+      <label>Tool</label>
+      <select id="tool-select" onchange="onToolChange()">
+        <option value="">-- Select tool --</option>
+        <option value="database">database</option>
+        <option value="email">email</option>
+        <option value="filestore">filestore</option>
+        <option value="calculator">calculator</option>
+        <option value="calendar">calendar</option>
+        <option value="validator">validator</option>
+      </select>
+      <label>Method</label>
+      <select id="method-select" onchange="onMethodChange()">
+        <option value="">-- Select method --</option>
+      </select>
+      <label>Parameters (JSON)</label>
+      <textarea id="params-input" placeholder="Select a tool and method above to see expected parameters"></textarea>
       <div class="btn-row">
-        <button class="btn btn-blue" onclick="doStep()" id="step-btn">Submit</button>
-        <span id="loading-indicator" style="display:none;color:#94a3b8;font-size:12px">Interpreting...</span>
+        <button class="btn btn-blue" onclick="doStep()" id="step-btn">Execute Step</button>
       </div>
     </div>
 
     <div class="card">
       <h2>Tool Reference</h2>
-      <div style="font-size:12px;color:#94a3b8;margin-bottom:6px">Available tools and methods you can ask about</div>
+      <div style="font-size:12px;color:#94a3b8;margin-bottom:6px">Available tools &mdash; click a method to select it</div>
       <div id="tool-ref"></div>
     </div>
   </div>
@@ -438,11 +459,6 @@ Three tasks test increasing difficulty: simple data lookup, multi-step report ge
     <div class="card" style="margin-bottom:16px">
       <h2>Task Description</h2>
       <div id="task-desc" style="font-size:13px;color:#cbd5e1;min-height:40px">Reset an environment to see the task.</div>
-    </div>
-
-    <div class="card" id="interpreted-card" style="margin-bottom:16px;display:none">
-      <h2>Interpreted As</h2>
-      <pre id="interpreted-output" style="color:#a78bfa;font-size:13px"></pre>
     </div>
 
     <div class="card" style="margin-bottom:16px">
@@ -465,44 +481,125 @@ Three tasks test increasing difficulty: simple data lookup, multi-step report ge
 </div>
 
 <script>
-const TOOL_INFO = {
-  database: ['query(sql)', 'insert(table, data)'],
-  email: ['send(to, subject, body)', 'search(query)', 'list_inbox()'],
-  filestore: ['read(path)', 'write(path, content)', 'list(directory)'],
-  calculator: ['compute(expression)', 'group_sum(data, group_by, aggregate)', 'date_diff(date1, date2)'],
-  calendar: ['get_events(user, date_range)', 'find_free_slots(users, date_range, duration_minutes)', 'create_event(title, attendees, start, end)'],
-  validator: ['validate(data, schema_name)']
+const TOOLS = {
+  database: {
+    query: {hint:'{"sql": ""}'},
+    insert: {hint:'{"table": "", "data": {}}'}
+  },
+  email: {
+    send: {hint:'{"to": "", "subject": "", "body": ""}'},
+    search: {hint:'{"query": ""}'},
+    list_inbox: {hint:'{}'}
+  },
+  filestore: {
+    read: {hint:'{"path": ""}'},
+    write: {hint:'{"path": "", "content": ""}'},
+    list: {hint:'{"directory": ""}'}
+  },
+  calculator: {
+    compute: {hint:'{"expression": ""}'},
+    group_sum: {hint:'{"data": [], "group_by": "", "aggregate": ""}'},
+    date_diff: {hint:'{"date1": "", "date2": ""}'}
+  },
+  calendar: {
+    get_events: {hint:'{"user": "", "date_range": {"start": "", "end": ""}}'},
+    find_free_slots: {hint:'{"users": [], "date_range": {"start": "", "end": ""}, "duration_minutes": 60}'},
+    create_event: {hint:'{"title": "", "attendees": [], "start": "", "end": ""}'}
+  },
+  validator: {
+    validate: {hint:'{"data": {}, "schema_name": ""}'}
+  }
 };
-let history = [];
 
-// Build tool reference (read-only, no click actions)
+// Auto-play demo sequences
+const DEMOS = {
+  easy: [
+    {tool_name:"database",method:"query",parameters:{sql:"SELECT * FROM employees WHERE hire_date > '2026-03-01'"}},
+    {tool_name:"email",method:"send",parameters:{to:"carol.johnson@acme.com",subject:"Welcome to the team, Carol Johnson!",body:"Welcome Carol! We are excited to have you in the Engineering department."}},
+    {tool_name:"email",method:"send",parameters:{to:"david.kim@acme.com",subject:"Welcome to the team, David Kim!",body:"Welcome David! We are excited to have you in the Engineering department."}},
+    {tool_name:"email",method:"send",parameters:{to:"hannah.davis@acme.com",subject:"Welcome to the team, Hannah Davis!",body:"Welcome Hannah! We are excited to have you in the Marketing department."}},
+    {tool_name:"email",method:"send",parameters:{to:"lisa.tanaka@acme.com",subject:"Welcome to the team, Lisa Tanaka!",body:"Welcome Lisa! We are excited to have you in the Finance department."}}
+  ],
+  medium: [
+    {tool_name:"database",method:"query",parameters:{sql:"SELECT * FROM expenses WHERE date >= '2026-03-01' AND date < '2026-04-01'"}},
+    {tool_name:"calculator",method:"group_sum",parameters:{data:[{category:"Travel",amount:450},{category:"Software",amount:1200},{category:"Travel",amount:380},{category:"Office",amount:275},{category:"Software",amount:850},{category:"Office",amount:120}],group_by:"category",aggregate:"amount"}},
+    {tool_name:"filestore",method:"write",parameters:{path:"reports/march-2026-expenses.md",content:"# March 2026 Expense Report\n\n| Category | Total |\n|----------|-------|\n| Travel | $830 |\n| Software | $2,050 |\n| Office | $395 |\n\n**Grand Total: $3,275**"}},
+    {tool_name:"email",method:"send",parameters:{to:"finance@acme.com",subject:"March 2026 Expense Report",body:"Please find attached the March 2026 expense report. Grand total: $3,275.",attachment:"reports/march-2026-expenses.md"}}
+  ],
+  hard: [
+    {tool_name:"database",method:"query",parameters:{sql:"SELECT * FROM projects WHERE name = 'Project Alpha'"}},
+    {tool_name:"database",method:"query",parameters:{sql:"SELECT * FROM employees WHERE department = 'Engineering'"}},
+    {tool_name:"calendar",method:"find_free_slots",parameters:{users:["user_01","user_02","user_03","user_04"],date_range:{start:"2026-04-01",end:"2026-04-07"},duration_minutes:60}},
+    {tool_name:"calendar",method:"create_event",parameters:{title:"Q2 Review - Project Alpha",attendees:["user_01","user_02","user_03"],start:"2026-04-03T10:00",end:"2026-04-03T11:00"}},
+    {tool_name:"filestore",method:"read",parameters:{path:"projects/q1-review.md"}},
+    {tool_name:"filestore",method:"write",parameters:{path:"meetings/q2-review-agenda.md",content:"# Q2 Review Agenda - Project Alpha\n\n1. Q1 Review Summary\n2. Q2 Goals\n3. Team Updates\n4. Action Items"}},
+    {tool_name:"email",method:"send",parameters:{to:"user_01@acme.com",subject:"Q2 Review Meeting - Project Alpha",body:"Hi team, please find the agenda for our Q2 review meeting attached. Meeting scheduled for April 3rd 10:00-11:00.",attachment:"meetings/q2-review-agenda.md"}}
+  ]
+};
+
+let history = [];
+let demoRunning = false;
+
+function onToolChange() {
+  const tool = document.getElementById('tool-select').value;
+  const msel = document.getElementById('method-select');
+  msel.innerHTML = '<option value="">-- Select method --</option>';
+  document.getElementById('params-input').value = '';
+  document.getElementById('params-input').placeholder = 'Select a tool and method above to see expected parameters';
+  if (tool && TOOLS[tool]) {
+    for (const m of Object.keys(TOOLS[tool])) {
+      msel.innerHTML += `<option value="${m}">${m}</option>`;
+    }
+  }
+}
+
+function onMethodChange() {
+  const tool = document.getElementById('tool-select').value;
+  const method = document.getElementById('method-select').value;
+  const params = document.getElementById('params-input');
+  params.value = '';
+  if (tool && method && TOOLS[tool] && TOOLS[tool][method]) {
+    params.placeholder = TOOLS[tool][method].hint;
+  } else {
+    params.placeholder = 'Select a tool and method above';
+  }
+}
+
+function selectToolMethod(tool, method) {
+  document.getElementById('tool-select').value = tool;
+  onToolChange();
+  document.getElementById('method-select').value = method;
+  onMethodChange();
+}
+
+// Build tool reference with clickable methods
 (function(){
   let html = '';
-  for (const [t, methods] of Object.entries(TOOL_INFO)) {
-    html += `<div style="margin-bottom:6px"><strong style="color:#cbd5e1;font-size:13px">${t}</strong><div class="tools-ref">`;
-    for (const m of methods) html += `<span class="chip">${m}</span>`;
+  for (const [t, methods] of Object.entries(TOOLS)) {
+    html += `<div style="margin-bottom:6px"><strong style="color:#cbd5e1;font-size:13px">${t}</strong><div class="tools-ref" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">`;
+    for (const m of Object.keys(methods)) {
+      html += `<span class="chip" onclick="selectToolMethod('${t}','${m}')">${m}</span>`;
+    }
     html += '</div></div>';
   }
   document.getElementById('tool-ref').innerHTML = html;
 })();
-
-// Enter key submits
-document.getElementById('nl-input').addEventListener('keydown', function(e) {
-  if (e.key === 'Enter') { e.preventDefault(); doStep(); }
-});
 
 async function api(body) {
   const r = await fetch('/interact', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
   return r.json();
 }
 
-async function doReset() {
-  const task = document.getElementById('task-select').value;
+function resetUI() {
   history = [];
   document.getElementById('history-list').innerHTML = '<div style="color:#475569;font-size:13px">No steps yet.</div>';
   document.getElementById('grader-card').style.display = 'none';
   document.getElementById('st-done-wrap').style.display = 'none';
-  document.getElementById('interpreted-card').style.display = 'none';
+}
+
+async function doReset() {
+  const task = document.getElementById('task-select').value;
+  resetUI();
   const d = await api({action: 'reset', task_id: task});
   document.getElementById('task-desc').textContent = d.observation.task_description;
   document.getElementById('response-output').textContent = JSON.stringify(d.observation.tool_response, null, 2);
@@ -510,72 +607,101 @@ async function doReset() {
   document.getElementById('st-reward').textContent = '0.0000';
   document.getElementById('st-task').textContent = task;
   document.getElementById('step-btn').disabled = false;
-  document.getElementById('nl-input').value = '';
 }
 
-async function doStep() {
-  const text = document.getElementById('nl-input').value.trim();
-  if (!text) { alert('Type an instruction first'); return; }
-
-  document.getElementById('step-btn').disabled = true;
-  document.getElementById('loading-indicator').style.display = 'inline';
-
-  let d;
-  try {
-    d = await api({action: 'nl', text: text});
-  } finally {
-    document.getElementById('loading-indicator').style.display = 'none';
-  }
-
+function handleStepResult(d) {
   if (d.error) {
     document.getElementById('response-output').textContent = 'Error: ' + d.error;
-    document.getElementById('step-btn').disabled = false;
     return;
   }
-
-  // Show interpreted tool call
-  if (d.interpreted_as) {
-    const ia = d.interpreted_as;
-    document.getElementById('interpreted-card').style.display = 'block';
-    document.getElementById('interpreted-output').textContent = `${ia.tool_name}.${ia.method}(${JSON.stringify(ia.parameters)})`;
-  }
-
   const obs = d.observation;
   document.getElementById('response-output').textContent = JSON.stringify(obs.tool_response, null, 2);
   document.getElementById('st-step').textContent = `${obs.step_number}/${obs.max_steps}`;
   document.getElementById('st-reward').textContent = (d.reward || 0).toFixed(4);
 
-  const ia = d.interpreted_as || {};
-  history.push({tool: ia.tool_name||'?', method: ia.method||'?', input: text, reward: d.reward, done: d.done});
+  const tool = d._tool || '?';
+  const method = d._method || '?';
+  history.push({tool, method, reward: d.reward, done: d.done});
   let hhtml = '';
   history.forEach((h, i) => {
-    hhtml += `<div class="h-entry"><span class="h-step">[${i+1}]</span> <span class="h-action">${h.tool}.${h.method}</span> <span style="color:#64748b">"${h.input}"</span> <span class="h-reward">reward=${(h.reward||0).toFixed(4)}</span>${h.done ? ' <span style="color:#22c55e">DONE</span>' : ''}</div>`;
+    hhtml += `<div class="h-entry"><span class="h-step">[${i+1}]</span> <span class="h-action">${h.tool}.${h.method}</span> <span class="h-reward">reward=${(h.reward||0).toFixed(4)}</span>${h.done ? ' <span style="color:#22c55e">DONE</span>' : ''}</div>`;
   });
   document.getElementById('history-list').innerHTML = hhtml;
-
-  document.getElementById('nl-input').value = '';
-  document.getElementById('step-btn').disabled = d.done;
+  document.getElementById('history-list').scrollTop = 99999;
 
   if (d.done) {
     document.getElementById('st-done-wrap').style.display = 'flex';
-    if (d.grader) {
-      const gc = document.getElementById('grader-card');
-      gc.style.display = 'block';
-      const sc = d.grader.score;
-      const cls = sc >= 0.9 ? 's-green' : sc >= 0.5 ? 's-blue' : sc > 0 ? 's-yellow' : 's-gray';
-      document.getElementById('grader-score').className = 'score-big ' + cls;
-      document.getElementById('grader-score').textContent = sc.toFixed(4);
-      let bhtml = '';
-      for (const [k, v] of Object.entries(d.grader.breakdown || {})) {
-        const pct = (v * 100).toFixed(0);
-        bhtml += `<div class="grader-row"><span style="min-width:140px">${k}</span><div class="grader-bar"><div class="grader-fill" style="width:${pct}%"></div></div><span style="min-width:40px;text-align:right;color:#f8fafc">${v.toFixed(2)}</span></div>`;
-      }
-      document.getElementById('grader-breakdown').innerHTML = bhtml;
-    }
+    document.getElementById('step-btn').disabled = true;
+    if (d.grader) showGrader(d.grader);
   }
 }
 
-// Health check on load
+function showGrader(grader) {
+  const gc = document.getElementById('grader-card');
+  gc.style.display = 'block';
+  const sc = grader.score;
+  const cls = sc >= 0.9 ? 's-green' : sc >= 0.5 ? 's-blue' : sc > 0 ? 's-yellow' : 's-gray';
+  document.getElementById('grader-score').className = 'score-big ' + cls;
+  document.getElementById('grader-score').textContent = sc.toFixed(4);
+  let bhtml = '';
+  for (const [k, v] of Object.entries(grader.breakdown || {})) {
+    const pct = (v * 100).toFixed(0);
+    bhtml += `<div class="grader-row"><span style="min-width:140px">${k}</span><div class="grader-bar"><div class="grader-fill" style="width:${pct}%"></div></div><span style="min-width:40px;text-align:right;color:#f8fafc">${v.toFixed(2)}</span></div>`;
+  }
+  document.getElementById('grader-breakdown').innerHTML = bhtml;
+}
+
+async function doStep() {
+  const tool = document.getElementById('tool-select').value;
+  const method = document.getElementById('method-select').value;
+  if (!tool || !method) { alert('Select a tool and method first'); return; }
+  let params = document.getElementById('params-input').value.trim();
+  try { params = params ? JSON.parse(params) : {}; } catch(e) { alert('Invalid JSON in parameters: ' + e.message); return; }
+
+  const d = await api({action: 'step', tool_name: tool, method: method, parameters: params});
+  d._tool = tool;
+  d._method = method;
+  handleStepResult(d);
+}
+
+async function runDemo(taskId) {
+  if (demoRunning) return;
+  demoRunning = true;
+  const btns = ['demo-easy-btn','demo-medium-btn','demo-hard-btn'];
+  btns.forEach(id => document.getElementById(id).disabled = true);
+  document.getElementById('step-btn').disabled = true;
+
+  const statusEl = document.getElementById('demo-status');
+  statusEl.textContent = 'Resetting environment...';
+
+  // Reset
+  document.getElementById('task-select').value = taskId;
+  resetUI();
+  const rd = await api({action: 'reset', task_id: taskId});
+  document.getElementById('task-desc').textContent = rd.observation.task_description;
+  document.getElementById('response-output').textContent = JSON.stringify(rd.observation.tool_response, null, 2);
+  document.getElementById('st-step').textContent = `0/${rd.observation.max_steps}`;
+  document.getElementById('st-reward').textContent = '0.0000';
+  document.getElementById('st-task').textContent = taskId;
+
+  const steps = DEMOS[taskId];
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    statusEl.textContent = `Running step ${i+1}/${steps.length}: ${s.tool_name}.${s.method}...`;
+    await new Promise(r => setTimeout(r, 600));
+    const d = await api({action:'step', tool_name:s.tool_name, method:s.method, parameters:s.parameters});
+    d._tool = s.tool_name;
+    d._method = s.method;
+    handleStepResult(d);
+    if (d.done) break;
+  }
+
+  statusEl.textContent = 'Demo complete!';
+  demoRunning = false;
+  btns.forEach(id => document.getElementById(id).disabled = false);
+}
+
+// Health check
 (async()=>{
   try {
     const r = await fetch('/health');
