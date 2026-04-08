@@ -21,6 +21,7 @@ Hackathon-specific endpoints (added below):
     - POST /baseline: Run inference baseline on all tasks
 """
 
+import json
 import os
 
 from fastapi.responses import HTMLResponse
@@ -66,6 +67,63 @@ def _get_env() -> ToolOrchestrationEnvironment:
     if _env_instance is None:
         _env_instance = ToolOrchestrationEnvironment()
     return _env_instance
+
+
+_NL_SYSTEM_PROMPT = (
+    "You are a tool-call translator. The user describes an action in natural language. "
+    "You MUST respond with ONLY a JSON object — no other text, no markdown.\n\n"
+    "Available tools and methods:\n"
+    "- database: query(sql), insert(table, data)\n"
+    "- email: send(to, subject, body), search(query), list_inbox()\n"
+    "- filestore: read(path), write(path, content), list(directory)\n"
+    "- calculator: compute(expression), group_sum(data, group_by, aggregate), date_diff(date1, date2)\n"
+    "- calendar: get_events(user, date_range), find_free_slots(users, date_range, duration_minutes), create_event(title, attendees, start, end)\n"
+    "- validator: validate(data, schema_name)\n\n"
+    'Respond with ONLY: {"tool_name": "...", "method": "...", "parameters": {...}}\n'
+    "No explanation. No markdown. Just the JSON object."
+)
+
+_DEFAULT_HF_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+
+
+def _interpret_nl(text: str, task_description: str = "") -> dict:
+    """Use an LLM to convert natural language into a structured tool call."""
+    hf_token = os.environ.get("HF_TOKEN", "")
+    if not hf_token:
+        raise ValueError("HF_TOKEN not configured. Set it in your Space secrets.")
+
+    api_base = os.environ.get("API_BASE_URL", "")
+    model = os.environ.get("MODEL_NAME", "") or _DEFAULT_HF_MODEL
+
+    if not api_base:
+        api_base = f"https://api-inference.huggingface.co/models/{model}/v1"
+
+    from openai import OpenAI
+    client = OpenAI(base_url=api_base, api_key=hf_token)
+
+    user_msg = text
+    if task_description:
+        user_msg = f"Current task: {task_description}\n\nUser request: {text}"
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": _NL_SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+        ],
+        temperature=0.0,
+        max_tokens=500,
+    )
+
+    content = response.choices[0].message.content.strip()
+    # Strip markdown code blocks if present
+    if content.startswith("```"):
+        content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+
+    return json.loads(content)
 
 
 @app.get("/tasks")
@@ -116,8 +174,6 @@ async def run_baseline():
         'Respond with ONLY a JSON object: {"tool_name": "...", "method": "...", "parameters": {...}}\n'
         "Do not include any other text. Look at the workspace to see results from your previous tool calls."
     )
-
-    import json
 
     for task_id in ["easy", "medium", "hard"]:
         try:
@@ -200,15 +256,51 @@ async def interact(payload: dict):
         method = payload.get("method", "")
         parameters = payload.get("parameters", {})
         if isinstance(parameters, str):
-            import json as _json
             try:
-                parameters = _json.loads(parameters) if parameters.strip() else {}
-            except _json.JSONDecodeError:
+                parameters = json.loads(parameters) if parameters.strip() else {}
+            except json.JSONDecodeError:
                 return {"error": "Invalid JSON in parameters"}
 
         act = ToolOrchestrationAction(tool_name=tool_name, method=method, parameters=parameters)
         obs = env.step(act)
         result = {
+            "observation": {
+                "tool_response": obs.tool_response,
+                "task_description": obs.task_description,
+                "workspace": obs.workspace,
+                "step_number": obs.step_number,
+                "max_steps": obs.max_steps,
+            },
+            "reward": obs.reward,
+            "done": obs.done,
+        }
+        if obs.done:
+            grader = env.get_last_grader_result()
+            if grader:
+                result["grader"] = grader
+        return result
+
+    elif action_type == "nl":
+        text = payload.get("text", "").strip()
+        if not text:
+            return {"error": "No text provided."}
+        try:
+            task_desc = ""
+            if hasattr(env, '_current_task') and env._current_task:
+                task_desc = env._current_task.get("description", "")
+            parsed = _interpret_nl(text, task_desc)
+            tool_name = parsed.get("tool_name", "")
+            method = parsed.get("method", "")
+            parameters = parsed.get("parameters", {})
+        except ValueError as e:
+            return {"error": str(e)}
+        except (json.JSONDecodeError, Exception) as e:
+            return {"error": f"Could not interpret input: {e}"}
+
+        act = ToolOrchestrationAction(tool_name=tool_name, method=method, parameters=parameters)
+        obs = env.step(act)
+        result = {
+            "interpreted_as": {"tool_name": tool_name, "method": method, "parameters": parameters},
             "observation": {
                 "tool_response": obs.tool_response,
                 "task_description": obs.task_description,
@@ -327,18 +419,19 @@ Three tasks test increasing difficulty: simple data lookup, multi-step report ge
     </div>
 
     <div class="card" style="margin-bottom:16px">
-      <h2>2. Execute Action</h2>
-      <label>Action (JSON)</label>
-      <textarea id="action-input" rows="5" placeholder='{"tool_name": "database", "method": "query", "parameters": {"sql": "SELECT * FROM employees"}}'></textarea>
-      <div style="font-size:11px;color:#64748b;margin-top:4px">Enter a JSON object with <code>tool_name</code>, <code>method</code>, and <code>parameters</code>. Click a tool below to see an example.</div>
+      <h2>2. Tell the Agent What to Do</h2>
+      <label>Your instruction</label>
+      <input type="text" id="nl-input" placeholder="e.g. look up all employees in the database" autocomplete="off">
+      <div style="font-size:11px;color:#64748b;margin-top:4px">Type in plain English. An LLM will interpret your instruction into a tool call.</div>
       <div class="btn-row">
         <button class="btn btn-blue" onclick="doStep()" id="step-btn">Submit</button>
+        <span id="loading-indicator" style="display:none;color:#94a3b8;font-size:12px">Interpreting...</span>
       </div>
     </div>
 
     <div class="card">
       <h2>Tool Reference</h2>
-      <div style="font-size:12px;color:#94a3b8;margin-bottom:6px">Click a tool to populate the form above</div>
+      <div style="font-size:12px;color:#94a3b8;margin-bottom:6px">Available tools and methods you can ask about</div>
       <div id="tool-ref"></div>
     </div>
   </div>
@@ -348,6 +441,11 @@ Three tasks test increasing difficulty: simple data lookup, multi-step report ge
     <div class="card" style="margin-bottom:16px">
       <h2>Task Description</h2>
       <div id="task-desc" style="font-size:13px;color:#cbd5e1;min-height:40px">Reset an environment to see the task.</div>
+    </div>
+
+    <div class="card" id="interpreted-card" style="margin-bottom:16px;display:none">
+      <h2>Interpreted As</h2>
+      <pre id="interpreted-output" style="color:#a78bfa;font-size:13px"></pre>
     </div>
 
     <div class="card" style="margin-bottom:16px">
@@ -370,45 +468,31 @@ Three tasks test increasing difficulty: simple data lookup, multi-step report ge
 </div>
 
 <script>
-const EXAMPLES = {
-  'database.query': {"tool_name":"database","method":"query","parameters":{"sql":"SELECT * FROM employees WHERE hire_date > '2026-03-01'"}},
-  'database.insert': {"tool_name":"database","method":"insert","parameters":{"table":"employees","data":{"name":"Test"}}},
-  'email.send': {"tool_name":"email","method":"send","parameters":{"to":"user@acme.com","subject":"Hello","body":"Hi there"}},
-  'email.search': {"tool_name":"email","method":"search","parameters":{"query":"expense"}},
-  'email.list_inbox': {"tool_name":"email","method":"list_inbox","parameters":{}},
-  'filestore.read': {"tool_name":"filestore","method":"read","parameters":{"path":"projects/q1-review.md"}},
-  'filestore.write': {"tool_name":"filestore","method":"write","parameters":{"path":"output.md","content":"# Report"}},
-  'filestore.list': {"tool_name":"filestore","method":"list","parameters":{"directory":""}},
-  'calculator.compute': {"tool_name":"calculator","method":"compute","parameters":{"expression":"sqrt(144) + 10"}},
-  'calculator.group_sum': {"tool_name":"calculator","method":"group_sum","parameters":{"data":[{"cat":"A","amt":100}],"group_by":"cat","aggregate":"amt"}},
-  'calculator.date_diff': {"tool_name":"calculator","method":"date_diff","parameters":{"date1":"2026-01-01","date2":"2026-04-01"}},
-  'calendar.get_events': {"tool_name":"calendar","method":"get_events","parameters":{"user":"user_01","date_range":{"start":"2026-04-01","end":"2026-04-07"}}},
-  'calendar.find_free_slots': {"tool_name":"calendar","method":"find_free_slots","parameters":{"users":["user_01","user_02"],"date_range":{"start":"2026-04-01","end":"2026-04-07"},"duration_minutes":60}},
-  'calendar.create_event': {"tool_name":"calendar","method":"create_event","parameters":{"title":"Meeting","attendees":["user_01"],"start":"2026-04-03T10:00","end":"2026-04-03T11:00"}},
-  'validator.validate': {"tool_name":"validator","method":"validate","parameters":{"data":{"to":"x@y.com","subject":"Hi","body":"Hello"},"schema_name":"email_format"}}
+const TOOL_INFO = {
+  database: ['query(sql)', 'insert(table, data)'],
+  email: ['send(to, subject, body)', 'search(query)', 'list_inbox()'],
+  filestore: ['read(path)', 'write(path, content)', 'list(directory)'],
+  calculator: ['compute(expression)', 'group_sum(data, group_by, aggregate)', 'date_diff(date1, date2)'],
+  calendar: ['get_events(user, date_range)', 'find_free_slots(users, date_range, duration_minutes)', 'create_event(title, attendees, start, end)'],
+  validator: ['validate(data, schema_name)']
 };
 let history = [];
 
-function fillExample(key) {
-  document.getElementById('action-input').value = JSON.stringify(EXAMPLES[key], null, 2);
-}
-
-// Build tool reference
+// Build tool reference (read-only, no click actions)
 (function(){
-  const tools = {};
-  for (const key of Object.keys(EXAMPLES)) {
-    const [t, m] = key.split('.');
-    if (!tools[t]) tools[t] = [];
-    tools[t].push({m, key});
-  }
   let html = '';
-  for (const [t, ms] of Object.entries(tools)) {
+  for (const [t, methods] of Object.entries(TOOL_INFO)) {
     html += `<div style="margin-bottom:6px"><strong style="color:#cbd5e1;font-size:13px">${t}</strong><div class="tools-ref">`;
-    for (const {m, key} of ms) html += `<span class="chip" onclick="fillExample('${key}')">${m}</span>`;
+    for (const m of methods) html += `<span class="chip">${m}</span>`;
     html += '</div></div>';
   }
   document.getElementById('tool-ref').innerHTML = html;
 })();
+
+// Enter key submits
+document.getElementById('nl-input').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') { e.preventDefault(); doStep(); }
+});
 
 async function api(body) {
   const r = await fetch('/interact', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
@@ -421,6 +505,7 @@ async function doReset() {
   document.getElementById('history-list').innerHTML = '<div style="color:#475569;font-size:13px">No steps yet.</div>';
   document.getElementById('grader-card').style.display = 'none';
   document.getElementById('st-done-wrap').style.display = 'none';
+  document.getElementById('interpreted-card').style.display = 'none';
   const d = await api({action: 'reset', task_id: task});
   document.getElementById('task-desc').textContent = d.observation.task_description;
   document.getElementById('response-output').textContent = JSON.stringify(d.observation.tool_response, null, 2);
@@ -428,35 +513,54 @@ async function doReset() {
   document.getElementById('st-reward').textContent = '0.0000';
   document.getElementById('st-task').textContent = task;
   document.getElementById('step-btn').disabled = false;
+  document.getElementById('nl-input').value = '';
 }
 
 async function doStep() {
-  const raw = document.getElementById('action-input').value.trim();
-  if (!raw) { alert('Enter a JSON action'); return; }
-  let parsed;
-  try { parsed = JSON.parse(raw); } catch(e) { alert('Invalid JSON: ' + e.message); return; }
-  const tool = parsed.tool_name || '';
-  const method = parsed.method || '';
-  const params = parsed.parameters || {};
+  const text = document.getElementById('nl-input').value.trim();
+  if (!text) { alert('Type an instruction first'); return; }
 
-  const d = await api({action: 'step', tool_name: tool, method: method, parameters: params});
-  if (d.error) { document.getElementById('response-output').textContent = 'Error: ' + d.error; return; }
+  document.getElementById('step-btn').disabled = true;
+  document.getElementById('loading-indicator').style.display = 'inline';
+
+  let d;
+  try {
+    d = await api({action: 'nl', text: text});
+  } finally {
+    document.getElementById('loading-indicator').style.display = 'none';
+  }
+
+  if (d.error) {
+    document.getElementById('response-output').textContent = 'Error: ' + d.error;
+    document.getElementById('step-btn').disabled = false;
+    return;
+  }
+
+  // Show interpreted tool call
+  if (d.interpreted_as) {
+    const ia = d.interpreted_as;
+    document.getElementById('interpreted-card').style.display = 'block';
+    document.getElementById('interpreted-output').textContent = `${ia.tool_name}.${ia.method}(${JSON.stringify(ia.parameters)})`;
+  }
 
   const obs = d.observation;
   document.getElementById('response-output').textContent = JSON.stringify(obs.tool_response, null, 2);
   document.getElementById('st-step').textContent = `${obs.step_number}/${obs.max_steps}`;
   document.getElementById('st-reward').textContent = (d.reward || 0).toFixed(4);
 
-  history.push({tool, method, reward: d.reward, done: d.done});
+  const ia = d.interpreted_as || {};
+  history.push({tool: ia.tool_name||'?', method: ia.method||'?', input: text, reward: d.reward, done: d.done});
   let hhtml = '';
   history.forEach((h, i) => {
-    hhtml += `<div class="h-entry"><span class="h-step">[${i+1}]</span> <span class="h-action">${h.tool}.${h.method}</span> <span class="h-reward">reward=${(h.reward||0).toFixed(4)}</span>${h.done ? ' <span style="color:#22c55e">DONE</span>' : ''}</div>`;
+    hhtml += `<div class="h-entry"><span class="h-step">[${i+1}]</span> <span class="h-action">${h.tool}.${h.method}</span> <span style="color:#64748b">"${h.input}"</span> <span class="h-reward">reward=${(h.reward||0).toFixed(4)}</span>${h.done ? ' <span style="color:#22c55e">DONE</span>' : ''}</div>`;
   });
   document.getElementById('history-list').innerHTML = hhtml;
 
+  document.getElementById('nl-input').value = '';
+  document.getElementById('step-btn').disabled = d.done;
+
   if (d.done) {
     document.getElementById('st-done-wrap').style.display = 'flex';
-    document.getElementById('step-btn').disabled = true;
     if (d.grader) {
       const gc = document.getElementById('grader-card');
       gc.style.display = 'block';
