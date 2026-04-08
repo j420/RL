@@ -96,7 +96,7 @@ def _interpret_nl(text: str, task_description: str = "") -> dict:
     model = os.environ.get("MODEL_NAME", "") or _DEFAULT_HF_MODEL
 
     if not api_base:
-        api_base = f"https://router.huggingface.co/hf-inference/models/{model}/v1"
+        api_base = "https://router.huggingface.co/hf-inference/v1"
 
     from openai import OpenAI
     client = OpenAI(base_url=api_base, api_key=hf_token)
