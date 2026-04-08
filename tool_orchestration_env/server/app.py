@@ -96,7 +96,7 @@ def _interpret_nl(text: str, task_description: str = "") -> dict:
     model = os.environ.get("MODEL_NAME", "") or _DEFAULT_HF_MODEL
 
     if not api_base:
-        api_base = "https://router.huggingface.co/hf-inference/v1"
+        api_base = "https://router.huggingface.co/v1"
 
     from openai import OpenAI
     client = OpenAI(base_url=api_base, api_key=hf_token)
@@ -294,8 +294,12 @@ async def interact(payload: dict):
             parameters = parsed.get("parameters", {})
         except ValueError as e:
             return {"error": str(e)}
-        except (json.JSONDecodeError, Exception) as e:
-            return {"error": f"Could not interpret input: {e}"}
+        except Exception as e:
+            err_msg = str(e)
+            # Include details for debugging
+            model_used = os.environ.get("MODEL_NAME", "") or _DEFAULT_HF_MODEL
+            api_used = os.environ.get("API_BASE_URL", "") or "https://router.huggingface.co/v1"
+            return {"error": f"LLM error: {err_msg} [model={model_used}, api={api_used}]"}
 
         act = ToolOrchestrationAction(tool_name=tool_name, method=method, parameters=parameters)
         obs = env.step(act)
