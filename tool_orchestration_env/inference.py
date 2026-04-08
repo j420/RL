@@ -6,8 +6,13 @@ Uses an OpenAI-compatible LLM to solve all 3 tasks (easy, medium, hard).
 Reads configuration from environment variables:
     - API_BASE_URL: LLM API base URL (e.g., https://api.openai.com/v1)
     - MODEL_NAME: Model to use (e.g., gpt-4o-mini)
-    - OPENAI_API_KEY: API key (preferred) — also accepts HF_TOKEN as fallback
+    - HF_TOKEN: API key / Hugging Face token (also accepts OPENAI_API_KEY)
     - ENV_URL: Environment server URL (default: http://localhost:7860)
+
+Emits structured stdout logs:
+    [START] — at the beginning of each task episode
+    [STEP]  — after each agent action
+    [END]   — at the end of each task episode
 """
 
 import json
@@ -73,9 +78,15 @@ def run_episode(
     result = client_sync.reset(task_id=task_id)
     obs = result.observation
 
-    print(f"\n  [{task_id.upper()}] Task: {obs.task_description[:80]}...")
-    print(f"  [{task_id.upper()}] Max steps: {obs.max_steps}")
+    # [START] structured log
+    print(json.dumps({
+        "type": "[START]",
+        "task_id": task_id,
+        "max_steps": obs.max_steps,
+        "task_description": obs.task_description[:120],
+    }))
 
+    step_num = 0
     while not result.done:
         # Build user message with full context
         user_msg = (
@@ -100,13 +111,29 @@ def run_episode(
             parameters=action_data.get("parameters", {}),
         )
 
-        print(f"  [{task_id.upper()}] Step {obs.step_number + 1}: {action.tool_name}.{action.method}")
-
         # Execute step
         result = client_sync.step(action)
         obs = result.observation
+        step_num += 1
 
-    print(f"  [{task_id.upper()}] Done! Final reward: {result.reward}")
+        # [STEP] structured log
+        print(json.dumps({
+            "type": "[STEP]",
+            "task_id": task_id,
+            "step": step_num,
+            "action": f"{action.tool_name}.{action.method}",
+            "reward": result.reward,
+            "done": result.done,
+        }))
+
+    # [END] structured log
+    print(json.dumps({
+        "type": "[END]",
+        "task_id": task_id,
+        "reward": result.reward,
+        "steps": step_num,
+    }))
+
     return result.reward
 
 
@@ -161,26 +188,27 @@ def main():
     # Read config from environment
     api_base = os.environ.get("API_BASE_URL", "")
     model_name = os.environ.get("MODEL_NAME", "gpt-4o-mini")
-    api_key = os.environ.get("OPENAI_API_KEY", "") or os.environ.get("HF_TOKEN", "")
+    hf_token = os.environ.get("HF_TOKEN", "") or os.environ.get("OPENAI_API_KEY", "")
     env_url = os.environ.get("ENV_URL", "http://localhost:7860")
 
-    if not api_base or not api_key:
-        print("Error: API_BASE_URL and API key environment variables are required.")
+    if not api_base or not hf_token:
+        print("Error: API_BASE_URL and HF_TOKEN environment variables are required.")
         print("Usage:")
         print("  export API_BASE_URL=https://api.openai.com/v1")
         print("  export MODEL_NAME=gpt-4o-mini")
-        print("  export OPENAI_API_KEY=your_api_key  # or HF_TOKEN")
+        print("  export HF_TOKEN=your_api_key")
         print("  python inference.py")
         sys.exit(1)
 
-    print(f"Configuration:")
-    print(f"  API_BASE_URL: {api_base}")
-    print(f"  MODEL_NAME:   {model_name}")
-    print(f"  ENV_URL:      {env_url}")
-    print()
+    print(json.dumps({
+        "type": "[CONFIG]",
+        "API_BASE_URL": api_base,
+        "MODEL_NAME": model_name,
+        "ENV_URL": env_url,
+    }))
 
-    # Initialize LLM client
-    llm_client = OpenAI(base_url=api_base, api_key=api_key)
+    # Initialize LLM client (OpenAI-compatible)
+    llm_client = OpenAI(base_url=api_base, api_key=hf_token)
 
     # Connect to environment via WebSocket
     env_client = ToolOrchestrationEnv(base_url=env_url)
@@ -198,11 +226,12 @@ def main():
                 scores[task_id] = 0.0
 
     # Print final results
-    print("\n" + "=" * 50)
-    print("BASELINE RESULTS")
-    print("=" * 50)
-    print(json.dumps(scores, indent=2))
-    print(f"\nAverage: {sum(scores.values()) / len(scores):.4f}")
+    avg = sum(scores.values()) / len(scores) if scores else 0.0
+    print(json.dumps({
+        "type": "[RESULTS]",
+        "scores": scores,
+        "average": round(avg, 4),
+    }))
 
 
 if __name__ == "__main__":
