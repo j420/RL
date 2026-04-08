@@ -6,14 +6,19 @@ Uses an OpenAI-compatible LLM to solve all 3 tasks (easy, medium, hard).
 Reads configuration from environment variables:
     - API_BASE_URL: LLM API base URL (e.g., https://api.openai.com/v1)
     - MODEL_NAME: Model to use (e.g., gpt-4o-mini)
-    - OPENAI_API_KEY: API key (preferred) — also accepts HF_TOKEN as fallback
+    - HF_TOKEN: API key / Hugging Face token (also accepts OPENAI_API_KEY)
     - ENV_URL: Environment server URL (default: http://localhost:7860)
+
+STDOUT FORMAT (mandatory for hackathon evaluation):
+    [START] task=<task_name> env=tool_orchestration_env model=<model_name>
+    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> score=<0.00> rewards=<r1,r2,...,rn>
 """
 
 import json
 import os
 import sys
-import time
+from typing import List, Optional
 
 from openai import OpenAI
 
@@ -23,6 +28,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tool_orchestration_env.models import ToolOrchestrationAction
 from tool_orchestration_env.client import ToolOrchestrationEnv
 
+
+BENCHMARK = "tool_orchestration_env"
+SUCCESS_THRESHOLD = 0.1
 
 SYSTEM_PROMPT = """You are an AI agent interacting with a tool orchestration environment. You must complete the given task by making tool calls.
 
@@ -63,6 +71,35 @@ IMPORTANT RULES:
 - Plan your tool calls efficiently to complete the task in as few steps as possible."""
 
 
+# ---------------------------------------------------------------------------
+# Structured logging helpers (mandatory hackathon format)
+# ---------------------------------------------------------------------------
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error if error else "null"
+    done_val = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Episode runner
+# ---------------------------------------------------------------------------
+
 def run_episode(
     client_sync,
     llm_client: OpenAI,
@@ -73,42 +110,72 @@ def run_episode(
     result = client_sync.reset(task_id=task_id)
     obs = result.observation
 
-    print(f"\n  [{task_id.upper()}] Task: {obs.task_description[:80]}...")
-    print(f"  [{task_id.upper()}] Max steps: {obs.max_steps}")
+    log_start(task=task_id, env=BENCHMARK, model=model_name)
 
-    while not result.done:
-        # Build user message with full context
-        user_msg = (
-            f"**Task:** {obs.task_description}\n\n"
-            f"**Step:** {obs.step_number}/{obs.max_steps}\n\n"
-            f"**Last tool response:**\n```json\n{json.dumps(obs.tool_response, indent=2, default=str)}\n```\n\n"
-        )
+    steps_taken = 0
+    rewards: List[float] = []
+    prev_reward = 0.0
+    score = 0.0
+    success = False
 
-        if obs.workspace:
-            # Show recent workspace entries (last 3 to avoid context overflow)
-            recent_keys = sorted(obs.workspace.keys())[-3:]
-            recent_workspace = {k: obs.workspace[k] for k in recent_keys}
-            user_msg += f"**Recent workspace (previous results):**\n```json\n{json.dumps(recent_workspace, indent=2, default=str)}\n```\n"
+    try:
+        while not result.done:
+            # Build user message with full context
+            user_msg = (
+                f"**Task:** {obs.task_description}\n\n"
+                f"**Step:** {obs.step_number}/{obs.max_steps}\n\n"
+                f"**Last tool response:**\n```json\n{json.dumps(obs.tool_response, indent=2, default=str)}\n```\n\n"
+            )
 
-        # Call LLM
-        action_data = call_llm(llm_client, model_name, user_msg)
+            if obs.workspace:
+                recent_keys = sorted(obs.workspace.keys())[-3:]
+                recent_workspace = {k: obs.workspace[k] for k in recent_keys}
+                user_msg += f"**Recent workspace (previous results):**\n```json\n{json.dumps(recent_workspace, indent=2, default=str)}\n```\n"
 
-        # Create action
-        action = ToolOrchestrationAction(
-            tool_name=action_data.get("tool_name", "validator"),
-            method=action_data.get("method", "validate"),
-            parameters=action_data.get("parameters", {}),
-        )
+            # Call LLM
+            action_data = call_llm(llm_client, model_name, user_msg)
 
-        print(f"  [{task_id.upper()}] Step {obs.step_number + 1}: {action.tool_name}.{action.method}")
+            # Create action
+            action = ToolOrchestrationAction(
+                tool_name=action_data.get("tool_name", "validator"),
+                method=action_data.get("method", "validate"),
+                parameters=action_data.get("parameters", {}),
+            )
 
-        # Execute step
-        result = client_sync.step(action)
-        obs = result.observation
+            # Execute step
+            result = client_sync.step(action)
+            obs = result.observation
+            steps_taken += 1
 
-    print(f"  [{task_id.upper()}] Done! Final reward: {result.reward}")
-    return result.reward
+            # Compute per-step reward delta
+            current_reward = result.reward or 0.0
+            step_reward = current_reward - prev_reward
+            rewards.append(step_reward)
+            prev_reward = current_reward
 
+            # Extract error from tool response (if any)
+            error = obs.tool_response.get("error") if isinstance(obs.tool_response, dict) else None
+
+            log_step(
+                step=steps_taken,
+                action=f"{action.tool_name}.{action.method}",
+                reward=step_reward,
+                done=result.done,
+                error=error,
+            )
+
+        score = result.reward or 0.0
+        success = score >= SUCCESS_THRESHOLD
+
+    finally:
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+    return score
+
+
+# ---------------------------------------------------------------------------
+# LLM caller
+# ---------------------------------------------------------------------------
 
 def call_llm(client: OpenAI, model: str, user_msg: str) -> dict:
     """Call the LLM and parse the JSON response. Retry once on failure."""
@@ -146,10 +213,10 @@ def call_llm(client: OpenAI, model: str, user_msg: str) -> dict:
 
         except (json.JSONDecodeError, Exception) as e:
             if attempt == 0:
-                print(f"    LLM parse error (attempt 1): {e}")
+                print(f"[DEBUG] LLM parse error (attempt 1): {e}", flush=True)
                 continue
             else:
-                print(f"    LLM parse error (attempt 2), using fallback")
+                print(f"[DEBUG] LLM parse error (attempt 2), using fallback", flush=True)
                 return {
                     "tool_name": "validator",
                     "method": "validate",
@@ -157,30 +224,28 @@ def call_llm(client: OpenAI, model: str, user_msg: str) -> dict:
                 }
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main():
     # Read config from environment
     api_base = os.environ.get("API_BASE_URL", "")
     model_name = os.environ.get("MODEL_NAME", "gpt-4o-mini")
-    api_key = os.environ.get("OPENAI_API_KEY", "") or os.environ.get("HF_TOKEN", "")
+    hf_token = os.environ.get("HF_TOKEN", "") or os.environ.get("OPENAI_API_KEY", "")
     env_url = os.environ.get("ENV_URL", "http://localhost:7860")
 
-    if not api_base or not api_key:
-        print("Error: API_BASE_URL and API key environment variables are required.")
-        print("Usage:")
-        print("  export API_BASE_URL=https://api.openai.com/v1")
-        print("  export MODEL_NAME=gpt-4o-mini")
-        print("  export OPENAI_API_KEY=your_api_key  # or HF_TOKEN")
-        print("  python inference.py")
+    if not api_base or not hf_token:
+        print("Error: API_BASE_URL and HF_TOKEN environment variables are required.", flush=True)
+        print("Usage:", flush=True)
+        print("  export API_BASE_URL=https://api.openai.com/v1", flush=True)
+        print("  export MODEL_NAME=gpt-4o-mini", flush=True)
+        print("  export HF_TOKEN=your_api_key", flush=True)
+        print("  python inference.py", flush=True)
         sys.exit(1)
 
-    print(f"Configuration:")
-    print(f"  API_BASE_URL: {api_base}")
-    print(f"  MODEL_NAME:   {model_name}")
-    print(f"  ENV_URL:      {env_url}")
-    print()
-
-    # Initialize LLM client
-    llm_client = OpenAI(base_url=api_base, api_key=api_key)
+    # Initialize LLM client (OpenAI-compatible)
+    llm_client = OpenAI(base_url=api_base, api_key=hf_token)
 
     # Connect to environment via WebSocket
     env_client = ToolOrchestrationEnv(base_url=env_url)
@@ -194,15 +259,8 @@ def main():
                 score = run_episode(sync_client, llm_client, model_name, task_id)
                 scores[task_id] = score
             except Exception as e:
-                print(f"  [{task_id.upper()}] Error: {e}")
+                print(f"[DEBUG] {task_id} error: {e}", flush=True)
                 scores[task_id] = 0.0
-
-    # Print final results
-    print("\n" + "=" * 50)
-    print("BASELINE RESULTS")
-    print("=" * 50)
-    print(json.dumps(scores, indent=2))
-    print(f"\nAverage: {sum(scores.values()) / len(scores):.4f}")
 
 
 if __name__ == "__main__":
