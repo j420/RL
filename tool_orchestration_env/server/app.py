@@ -22,7 +22,6 @@ Hackathon-specific endpoints (added below):
 """
 
 import os
-import time
 
 from fastapi.responses import HTMLResponse
 
@@ -240,130 +239,6 @@ async def interact(payload: dict):
     return {"error": f"Unknown action '{action_type}'. Use 'reset', 'step', or 'state'."}
 
 
-@app.post("/run-tests")
-async def run_tests():
-    """Run scripted integration tests on all 3 tasks + edge cases. No LLM needed."""
-    env = _get_env()
-    results = {"tests": [], "summary": {}}
-    passed = 0
-    failed = 0
-    start_time = time.time()
-
-    def check(name, condition, detail=""):
-        nonlocal passed, failed
-        status = "PASS" if condition else "FAIL"
-        if condition:
-            passed += 1
-        else:
-            failed += 1
-        results["tests"].append({"name": name, "status": status, "detail": detail})
-
-    # --- Easy task (perfect episode) ---
-    env.reset(task_id="easy")
-    obs = env.step(ToolOrchestrationAction(
-        tool_name="database", method="query",
-        parameters={"sql": "SELECT * FROM employees WHERE hire_date > '2026-03-01'"}
-    ))
-    check("easy: query finds 4 new hires", obs.tool_response.get("row_count") == 4)
-
-    for name, dept, email in [
-        ("Carol Johnson", "Engineering", "carol.johnson@acme.com"),
-        ("David Kim", "Engineering", "david.kim@acme.com"),
-        ("Hannah Davis", "Marketing", "hannah.davis@acme.com"),
-        ("Lisa Tanaka", "Finance", "lisa.tanaka@acme.com"),
-    ]:
-        obs = env.step(ToolOrchestrationAction(
-            tool_name="email", method="send",
-            parameters={"to": email, "subject": f"Welcome to the team, {name}!", "body": f"Welcome to the {dept} department."}
-        ))
-    easy_reward = env._normalize_reward()
-    easy_grader = env._grader_score
-    check("easy: done=True", env._done)
-    check("easy: score=1.0", easy_reward == 1.0, f"got {easy_reward}")
-    check("easy: grader=1.0", easy_grader == 1.0, f"got {easy_grader}")
-
-    # --- Medium task (perfect episode) ---
-    env.reset(task_id="medium")
-    obs = env.step(ToolOrchestrationAction(
-        tool_name="database", method="query",
-        parameters={"sql": "SELECT * FROM invoices WHERE date LIKE '2026-03%'"}
-    ))
-    rows = obs.tool_response.get("rows", [])
-    check("medium: query finds 47 invoices", obs.tool_response.get("row_count") == 47)
-
-    obs = env.step(ToolOrchestrationAction(
-        tool_name="calculator", method="group_sum",
-        parameters={"data": rows, "group_by": "category", "aggregate": "amount"}
-    ))
-    totals = obs.tool_response.get("result", {})
-    check("medium: Software=$8940", totals.get("Software") == 8940.0)
-    check("medium: Travel=$3200", totals.get("Travel") == 3200.0)
-
-    report = "# March 2026 Expense Report\n\n| Category | Total |\n|---|---|\n| Software | 8940 |\n| Travel | 3200 |\n| Office Supplies | 1450 |\n| Marketing | 5600 |\n| **Grand Total** | **19190** |"
-    env.step(ToolOrchestrationAction(tool_name="filestore", method="write", parameters={"path": "reports/march-2026-expenses.md", "content": report}))
-    obs = env.step(ToolOrchestrationAction(
-        tool_name="email", method="send",
-        parameters={"to": "finance@acme.com", "subject": "March 2026 Expense Report", "body": "See attached.", "attachment": "reports/march-2026-expenses.md"}
-    ))
-    medium_reward = env._normalize_reward()
-    check("medium: done=True", env._done)
-    check("medium: score=1.0", medium_reward == 1.0, f"got {medium_reward}")
-
-    # --- Hard task (perfect episode) ---
-    env.reset(task_id="hard")
-    env.step(ToolOrchestrationAction(tool_name="database", method="query", parameters={"sql": "SELECT * FROM projects WHERE name = 'Project Alpha'"}))
-    env.step(ToolOrchestrationAction(tool_name="database", method="query", parameters={"sql": "SELECT * FROM employees WHERE department = 'Engineering'"}))
-    obs = env.step(ToolOrchestrationAction(
-        tool_name="calendar", method="find_free_slots",
-        parameters={"users": ["user_01", "user_02", "user_03", "user_04"], "date_range": {"start": "2026-04-01", "end": "2026-04-07"}, "duration_minutes": 60}
-    ))
-    check("hard: user_03 unavailable", "user_03" in obs.tool_response.get("unavailable_users", []))
-    check("hard: free slots found", len(obs.tool_response.get("slots", [])) > 0)
-
-    env.step(ToolOrchestrationAction(tool_name="calendar", method="create_event", parameters={"title": "Q2 Review", "attendees": ["user_01", "user_02", "user_04"], "start": "2026-04-03T10:00", "end": "2026-04-03T11:00"}))
-    env.step(ToolOrchestrationAction(tool_name="filestore", method="read", parameters={"path": "projects/q1-review.md"}))
-    env.step(ToolOrchestrationAction(tool_name="filestore", method="write", parameters={"path": "meetings/q2-review-agenda.md", "content": "Q2 Review Agenda based on q1 accomplishments and v2.0"}))
-    obs = env.step(ToolOrchestrationAction(tool_name="email", method="send", parameters={"to": "engineering@acme.com", "subject": "Q2 Review Meeting", "body": "Q2 review meeting scheduled."}))
-    hard_reward = env._normalize_reward()
-    hard_grader = env._grader_score
-    check("hard: done=True", env._done)
-    check("hard: score=1.0", hard_reward == 1.0, f"got {hard_reward}")
-    check("hard: error_handling graded", hard_grader == 1.0, f"got {hard_grader}")
-
-    # --- Edge cases ---
-    env.reset(task_id="easy")
-    obs = env.step(ToolOrchestrationAction(tool_name="FAKE_TOOL", method="x", parameters={}))
-    check("edge: invalid tool returns error", "error" in obs.tool_response)
-
-    env.reset(task_id="easy")
-    obs = env.step(ToolOrchestrationAction(tool_name="calculator", method="compute", parameters={"expression": "().__class__.__bases__[0]"}))
-    check("edge: calculator blocks dunder attack", "error" in obs.tool_response)
-
-    obs = env.step(ToolOrchestrationAction(tool_name="calculator", method="compute", parameters={"expression": "sqrt(144) + abs(-5)"}))
-    check("edge: calculator allows safe math", obs.tool_response.get("result") == 17.0)
-
-    obs = env.step(ToolOrchestrationAction(tool_name="database", method="query", parameters={"sql": "DROP TABLE employees"}))
-    check("edge: SQL injection blocked", "error" in obs.tool_response)
-
-    # --- Grader variance ---
-    from .grader import Grader
-    g = Grader()
-    empty = g.grade("easy", [])
-    check("grader: empty history score=0", empty["score"] == 0.0)
-    check("grader: score != constant", easy_grader != empty["score"])
-
-    # --- Summary ---
-    elapsed = round(time.time() - start_time, 2)
-    results["summary"] = {
-        "passed": passed,
-        "failed": failed,
-        "total": passed + failed,
-        "elapsed_seconds": elapsed,
-        "scores": {"easy": easy_reward, "medium": medium_reward, "hard": hard_reward},
-    }
-    return results
-
-
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
     """Serve the environment dashboard."""
@@ -448,7 +323,6 @@ Three tasks test increasing difficulty: simple data lookup, multi-step report ge
       </select>
       <div class="btn-row">
         <button class="btn btn-green" onclick="doReset()">Reset Environment</button>
-        <button class="btn btn-gray" onclick="runAutoTests()">Run Automated Tests</button>
       </div>
     </div>
 
@@ -603,16 +477,6 @@ async function doStep() {
       document.getElementById('grader-breakdown').innerHTML = bhtml;
     }
   }
-}
-
-async function runAutoTests() {
-  document.getElementById('response-output').textContent = 'Running automated tests...';
-  const r = await fetch('/run-tests', {method:'POST'});
-  const d = await r.json();
-  let txt = `=== ${d.summary.passed}/${d.summary.total} PASSED (${d.summary.elapsed_seconds}s) ===\n`;
-  txt += `Easy: ${d.summary.scores.easy}  Medium: ${d.summary.scores.medium}  Hard: ${d.summary.scores.hard}\n\n`;
-  d.tests.forEach(t => { txt += `${t.status === 'PASS' ? 'PASS' : 'FAIL'}  ${t.name}${t.detail ? '  ('+t.detail+')' : ''}\n`; });
-  document.getElementById('response-output').textContent = txt;
 }
 
 // Health check on load
