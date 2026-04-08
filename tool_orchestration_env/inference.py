@@ -12,7 +12,7 @@ Reads configuration from environment variables:
 STDOUT FORMAT (mandatory for hackathon evaluation):
     [START] task=<task_name> env=tool_orchestration_env model=<model_name>
     [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
-    [END]   success=<true|false> steps=<n> score=<0.00> rewards=<r1,r2,...,rn>
+    [END]   success=<true|false> steps=<n> rewards=<r1,r2,...,rn>
 """
 
 import json
@@ -88,10 +88,10 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
     )
 
 
-def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+def log_end(success: bool, steps: int, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
-        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
         flush=True,
     )
 
@@ -168,7 +168,7 @@ def run_episode(
         success = score >= SUCCESS_THRESHOLD
 
     finally:
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+        log_end(success=success, steps=steps_taken, rewards=rewards)
 
     return score
 
@@ -229,20 +229,14 @@ def call_llm(client: OpenAI, model: str, user_msg: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def main():
-    # Read config from environment
-    api_base = os.environ.get("API_BASE_URL", "")
+    # Read config from environment (defaults required by hackathon spec)
+    api_base = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
     model_name = os.environ.get("MODEL_NAME", "gpt-4o-mini")
-    hf_token = os.environ.get("HF_TOKEN", "") or os.environ.get("OPENAI_API_KEY", "")
+    hf_token = os.environ.get("HF_TOKEN")
     env_url = os.environ.get("ENV_URL", "http://localhost:7860")
 
-    if not api_base or not hf_token:
-        print("Error: API_BASE_URL and HF_TOKEN environment variables are required.", flush=True)
-        print("Usage:", flush=True)
-        print("  export API_BASE_URL=https://api.openai.com/v1", flush=True)
-        print("  export MODEL_NAME=gpt-4o-mini", flush=True)
-        print("  export HF_TOKEN=your_api_key", flush=True)
-        print("  python inference.py", flush=True)
-        sys.exit(1)
+    if hf_token is None:
+        raise ValueError("HF_TOKEN environment variable is required")
 
     # Initialize LLM client (OpenAI-compatible)
     llm_client = OpenAI(base_url=api_base, api_key=hf_token)
