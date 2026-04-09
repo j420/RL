@@ -91,7 +91,7 @@ with client:
         ))
 
     check("easy perfect: done=True", result.done is True)
-    check("easy perfect: score=1.0", result.reward == 1.0, f"got {result.reward}")
+    check("easy perfect: score>=0.95", result.reward >= 0.95, f"got {result.reward}")
 
     # Check state
     state = client.state()
@@ -139,7 +139,7 @@ with client:
         }
     ))
     check("medium perfect: done=True", result.done is True)
-    check("medium perfect: score=1.0", result.reward == 1.0, f"got {result.reward}")
+    check("medium perfect: score>=0.95", result.reward >= 0.95, f"got {result.reward}")
 
 # --- Hard Task ---
 print(f"\n--- WebSocket: Hard Task (perfect episode) ---")
@@ -213,7 +213,7 @@ with client:
         }
     ))
     check("hard perfect: done=True", result.done is True)
-    check("hard perfect: score=1.0", result.reward == 1.0, f"got {result.reward}")
+    check("hard perfect: score>=0.95", result.reward >= 0.95, f"got {result.reward}")
 
 # --- Edge cases ---
 print(f"\n--- WebSocket: Edge Cases ---")
@@ -224,7 +224,7 @@ with client:
     result = client.reset(task_id="easy")
     result = client.step(ToolOrchestrationAction(tool_name="FAKE", method="x", parameters={}))
     check("invalid tool: returns error", "error" in result.observation.tool_response)
-    check("invalid tool: reward=0", result.reward == 0.0)
+    check("invalid tool: reward<=0.05", result.reward <= 0.05)
 
     # Step after done
     result = client.reset(task_id="easy")

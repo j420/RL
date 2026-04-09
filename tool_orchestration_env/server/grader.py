@@ -35,13 +35,17 @@ class Grader:
             {"score": float 0.0-1.0, "breakdown": {criterion: score}}
         """
         if task_id == "easy":
-            return self._grade_easy(episode_history, tool_states or {})
+            result = self._grade_easy(episode_history, tool_states or {})
         elif task_id == "medium":
-            return self._grade_medium(episode_history, tool_states or {})
+            result = self._grade_medium(episode_history, tool_states or {})
         elif task_id == "hard":
-            return self._grade_hard(episode_history, tool_states or {})
+            result = self._grade_hard(episode_history, tool_states or {})
         else:
-            return {"score": 0.0, "breakdown": {}, "error": f"Unknown task_id: {task_id}"}
+            return {"score": 0.01, "breakdown": {}, "error": f"Unknown task_id: {task_id}"}
+
+        # Clamp score to (0, 1) exclusive — evaluation requires strictly between 0 and 1
+        result["score"] = round(max(0.01, min(0.99, result["score"])), 4)
+        return result
 
     # =====================================================================
     # EASY: New Employee Welcome Emails

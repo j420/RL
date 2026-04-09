@@ -115,7 +115,7 @@ class ToolOrchestrationEnvironment(Environment):
             step_number=0,
             max_steps=self._task.max_steps,
             done=False,
-            reward=0.0,
+            reward=0.01,
         )
 
     def step(
@@ -338,7 +338,7 @@ class ToolOrchestrationEnvironment(Environment):
         self._grader_score = grader_result["score"]
 
     def _normalize_reward(self) -> float:
-        """Normalize total reward to 0.0-1.0 range.
+        """Normalize total reward to (0, 1) exclusive range.
 
         Formula: step_fraction * 0.3 + grader_score * 0.7
         - step_fraction: how well the agent followed the optimal tool sequence (0-1)
@@ -346,8 +346,11 @@ class ToolOrchestrationEnvironment(Environment):
 
         This ensures the grader's quality assessment dominates the reward signal,
         while per-step progress still provides useful intermediate feedback.
+        Clamped to (0.01, 0.99) because evaluation requires strictly between 0 and 1.
         """
         step_fraction = min(1.0, max(0.0, self._total_reward / max(self._max_possible_step_reward, 0.01)))
         if self._graded:
-            return round(step_fraction * 0.3 + self._grader_score * 0.7, 4)
-        return round(step_fraction * 0.3, 4)
+            raw = step_fraction * 0.3 + self._grader_score * 0.7
+        else:
+            raw = step_fraction * 0.3
+        return round(max(0.01, min(0.99, raw)), 4)
