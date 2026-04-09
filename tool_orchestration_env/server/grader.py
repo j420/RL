@@ -10,6 +10,15 @@ The grader inspects:
 
 from typing import Any, Dict, List, Optional
 
+# Score bounds — evaluation requires strictly between 0 and 1
+_SCORE_MIN = 0.01
+_SCORE_MAX = 0.99
+
+
+def _clamp(v: float) -> float:
+    """Clamp a score to (0, 1) exclusive."""
+    return round(max(_SCORE_MIN, min(_SCORE_MAX, float(v))), 4)
+
 
 class Grader:
     """Grades completed episodes against task-specific criteria."""
@@ -45,8 +54,8 @@ class Grader:
 
         # Clamp ALL scores to (0, 1) exclusive — evaluation requires strictly between 0 and 1
         for k in result.get("breakdown", {}):
-            result["breakdown"][k] = round(max(0.01, min(0.99, result["breakdown"][k])), 4)
-        result["score"] = round(max(0.01, min(0.99, result["score"])), 4)
+            result["breakdown"][k] = _clamp(result["breakdown"][k])
+        result["score"] = _clamp(result["score"])
         return result
 
     # =====================================================================
@@ -160,11 +169,14 @@ class Grader:
             body_score = depts_found / len(expected_set)
         breakdown["correct_body"] = min(1.0, body_score)
 
+        # Clamp all breakdown values
+        breakdown = {k: _clamp(v) for k, v in breakdown.items()}
+
         # Weighted score
         weights = {"correct_query": 0.25, "correct_recipients": 0.35, "correct_subjects": 0.20, "correct_body": 0.20}
         score = sum(breakdown[k] * weights[k] for k in weights)
 
-        return {"score": round(score, 4), "breakdown": breakdown}
+        return {"score": _clamp(score), "breakdown": breakdown}
 
     # =====================================================================
     # MEDIUM: Monthly Expense Report
@@ -298,6 +310,9 @@ class Grader:
 
         breakdown["report_completeness"] = completeness_score
 
+        # Clamp all breakdown values
+        breakdown = {k: _clamp(v) for k, v in breakdown.items()}
+
         # Weighted score
         weights = {
             "correct_query": 0.15, "correct_calculation": 0.20, "correct_report": 0.25,
@@ -305,7 +320,7 @@ class Grader:
         }
         score = sum(breakdown[k] * weights[k] for k in weights)
 
-        return {"score": round(score, 4), "breakdown": breakdown}
+        return {"score": _clamp(score), "breakdown": breakdown}
 
     # =====================================================================
     # HARD: Schedule Team Review Meeting
@@ -485,6 +500,9 @@ class Grader:
 
         breakdown["edge_case"] = edge_score
 
+        # Clamp all breakdown values
+        breakdown = {k: _clamp(v) for k, v in breakdown.items()}
+
         # Weighted score
         weights = {
             "project_lookup": 0.10, "team_query": 0.10, "calendar_check": 0.15,
@@ -493,4 +511,4 @@ class Grader:
         }
         score = sum(breakdown[k] * weights[k] for k in weights)
 
-        return {"score": round(score, 4), "breakdown": breakdown}
+        return {"score": _clamp(score), "breakdown": breakdown}
