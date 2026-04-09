@@ -43,7 +43,9 @@ class Grader:
         else:
             return {"score": 0.01, "breakdown": {}, "error": f"Unknown task_id: {task_id}"}
 
-        # Clamp score to (0, 1) exclusive — evaluation requires strictly between 0 and 1
+        # Clamp ALL scores to (0, 1) exclusive — evaluation requires strictly between 0 and 1
+        for k in result.get("breakdown", {}):
+            result["breakdown"][k] = round(max(0.01, min(0.99, result["breakdown"][k])), 4)
         result["score"] = round(max(0.01, min(0.99, result["score"])), 4)
         return result
 

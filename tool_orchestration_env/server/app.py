@@ -134,7 +134,7 @@ async def run_grader():
     env = _get_env()
     result = env.get_last_grader_result()
     if result is None:
-        return {"error": "No completed episode", "score": 0.0}
+        return {"error": "No completed episode", "score": 0.01}
     return result
 
 
@@ -218,9 +218,9 @@ async def run_baseline():
                 obs = env.step(action)
 
             grader_result = env.get_last_grader_result()
-            scores[task_id] = grader_result["score"] if grader_result else 0.0
+            scores[task_id] = grader_result["score"] if grader_result else 0.01
         except Exception as e:
-            scores[task_id] = 0.0
+            scores[task_id] = 0.01
 
     return {**scores, "status": "completed"}
 
