@@ -10,6 +10,15 @@ The grader inspects:
 
 from typing import Any, Dict, List, Optional
 
+# Score bounds — evaluation requires strictly between 0 and 1
+_SCORE_MIN = 0.01
+_SCORE_MAX = 0.99
+
+
+def _clamp(v: float) -> float:
+    """Clamp a score to (0, 1) exclusive."""
+    return round(max(_SCORE_MIN, min(_SCORE_MAX, float(v))), 4)
+
 
 class Grader:
     """Grades completed episodes against task-specific criteria."""
@@ -34,19 +43,23 @@ class Grader:
         Returns:
             {"score": float 0.0-1.0, "breakdown": {criterion: score}}
         """
-        if task_id == "easy":
-            result = self._grade_easy(episode_history, tool_states or {})
-        elif task_id == "medium":
-            result = self._grade_medium(episode_history, tool_states or {})
-        elif task_id == "hard":
-            result = self._grade_hard(episode_history, tool_states or {})
-        else:
-            return {"score": 0.01, "breakdown": {}, "error": f"Unknown task_id: {task_id}"}
+        try:
+            if task_id == "easy":
+                result = self._grade_easy(episode_history, tool_states or {})
+            elif task_id == "medium":
+                result = self._grade_medium(episode_history, tool_states or {})
+            elif task_id == "hard":
+                result = self._grade_hard(episode_history, tool_states or {})
+            else:
+                return {"score": _SCORE_MIN, "breakdown": {}, "error": f"Unknown task_id: {task_id}"}
+        except Exception:
+            # Defensive: malformed history should never crash the grader
+            return {"score": _SCORE_MIN, "breakdown": {}}
 
         # Clamp ALL scores to (0, 1) exclusive — evaluation requires strictly between 0 and 1
         for k in result.get("breakdown", {}):
-            result["breakdown"][k] = round(max(0.01, min(0.99, result["breakdown"][k])), 4)
-        result["score"] = round(max(0.01, min(0.99, result["score"])), 4)
+            result["breakdown"][k] = _clamp(result["breakdown"][k])
+        result["score"] = _clamp(result["score"])
         return result
 
     # =====================================================================
@@ -69,7 +82,7 @@ class Grader:
         # Did the agent query for employees with hire_date filter?
         query_score = 0.0
         for step in history:
-            action = step.get("action", {})
+            action = step.get("action") or {}
             if action.get("tool_name") == "database" and action.get("method") == "query":
                 sql = str(action.get("parameters", {}).get("sql", "")).upper()
                 if "HIRE_DATE" in sql and ("2026-03" in str(action.get("parameters", {}).get("sql", "")) or "2026-03-01" in str(action.get("parameters", {}).get("sql", ""))):
@@ -90,7 +103,7 @@ class Grader:
         else:
             # Fall back to action history
             for step in history:
-                action = step.get("action", {})
+                action = step.get("action") or {}
                 if action.get("tool_name") == "email" and action.get("method") == "send":
                     sent_to.add(action.get("parameters", {}).get("to", ""))
 
@@ -117,7 +130,7 @@ class Grader:
                     subjects.append((email.get("to"), email.get("subject", "")))
         else:
             for step in history:
-                action = step.get("action", {})
+                action = step.get("action") or {}
                 if action.get("tool_name") == "email" and action.get("method") == "send":
                     to = action.get("parameters", {}).get("to", "")
                     if to in expected_set:
@@ -144,7 +157,7 @@ class Grader:
                     bodies.append((email.get("to"), email.get("body", "")))
         else:
             for step in history:
-                action = step.get("action", {})
+                action = step.get("action") or {}
                 if action.get("tool_name") == "email" and action.get("method") == "send":
                     to = action.get("parameters", {}).get("to", "")
                     if to in expected_set:
@@ -160,11 +173,14 @@ class Grader:
             body_score = depts_found / len(expected_set)
         breakdown["correct_body"] = min(1.0, body_score)
 
+        # Clamp all breakdown values
+        breakdown = {k: _clamp(v) for k, v in breakdown.items()}
+
         # Weighted score
         weights = {"correct_query": 0.25, "correct_recipients": 0.35, "correct_subjects": 0.20, "correct_body": 0.20}
         score = sum(breakdown[k] * weights[k] for k in weights)
 
-        return {"score": round(score, 4), "breakdown": breakdown}
+        return {"score": _clamp(score), "breakdown": breakdown}
 
     # =====================================================================
     # MEDIUM: Monthly Expense Report
@@ -185,7 +201,7 @@ class Grader:
         # --- correct_query (0.15) ---
         query_score = 0.0
         for step in history:
-            action = step.get("action", {})
+            action = step.get("action") or {}
             if action.get("tool_name") == "database" and action.get("method") == "query":
                 sql = str(action.get("parameters", {}).get("sql", "")).upper()
                 if "INVOICE" in sql:
@@ -199,7 +215,7 @@ class Grader:
         # --- correct_calculation (0.20) ---
         calc_score = 0.0
         for step in history:
-            action = step.get("action", {})
+            action = step.get("action") or {}
             if action.get("tool_name") == "calculator":
                 if action.get("method") == "group_sum":
                     calc_score = 1.0
@@ -227,7 +243,7 @@ class Grader:
         if not report_content:
             # Check action history for filestore.write
             for step in history:
-                action = step.get("action", {})
+                action = step.get("action") or {}
                 if action.get("tool_name") == "filestore" and action.get("method") == "write":
                     path = action.get("parameters", {}).get("path", "")
                     content = action.get("parameters", {}).get("content", "")
@@ -267,7 +283,7 @@ class Grader:
             sent_emails = outbox
         else:
             for step in history:
-                action = step.get("action", {})
+                action = step.get("action") or {}
                 if action.get("tool_name") == "email" and action.get("method") == "send":
                     sent_emails.append(action.get("parameters", {}))
 
@@ -298,6 +314,9 @@ class Grader:
 
         breakdown["report_completeness"] = completeness_score
 
+        # Clamp all breakdown values
+        breakdown = {k: _clamp(v) for k, v in breakdown.items()}
+
         # Weighted score
         weights = {
             "correct_query": 0.15, "correct_calculation": 0.20, "correct_report": 0.25,
@@ -305,7 +324,7 @@ class Grader:
         }
         score = sum(breakdown[k] * weights[k] for k in weights)
 
-        return {"score": round(score, 4), "breakdown": breakdown}
+        return {"score": _clamp(score), "breakdown": breakdown}
 
     # =====================================================================
     # HARD: Schedule Team Review Meeting
@@ -318,7 +337,7 @@ class Grader:
         # --- project_lookup (0.10) ---
         proj_score = 0.0
         for step in history:
-            action = step.get("action", {})
+            action = step.get("action") or {}
             if action.get("tool_name") == "database" and action.get("method") == "query":
                 sql = str(action.get("parameters", {}).get("sql", ""))
                 if "project" in sql.lower() and "alpha" in sql.lower():
@@ -331,7 +350,7 @@ class Grader:
         # --- team_query (0.10) ---
         team_score = 0.0
         for step in history:
-            action = step.get("action", {})
+            action = step.get("action") or {}
             if action.get("tool_name") == "database" and action.get("method") == "query":
                 sql = str(action.get("parameters", {}).get("sql", ""))
                 if "employee" in sql.lower() and ("engineering" in sql.lower() or "department" in sql.lower()):
@@ -342,7 +361,7 @@ class Grader:
         # --- calendar_check (0.15) ---
         cal_score = 0.0
         for step in history:
-            action = step.get("action", {})
+            action = step.get("action") or {}
             if action.get("tool_name") == "calendar":
                 if action.get("method") == "find_free_slots":
                     cal_score = 1.0
@@ -359,8 +378,8 @@ class Grader:
         proceeded_after_error = False
 
         for i, step in enumerate(history):
-            action = step.get("action", {})
-            result = step.get("result", {})
+            action = step.get("action") or {}
+            result = step.get("result") or {}
 
             # Count user_03 calendar queries
             if action.get("tool_name") == "calendar":
@@ -395,7 +414,7 @@ class Grader:
         # --- meeting_created (0.15) ---
         meeting_score = 0.0
         for step in history:
-            action = step.get("action", {})
+            action = step.get("action") or {}
             if action.get("tool_name") == "calendar" and action.get("method") == "create_event":
                 params = action.get("parameters", {})
                 if params.get("title") and params.get("attendees") and params.get("start"):
@@ -410,7 +429,7 @@ class Grader:
         # Check if agent read q1-review.md
         read_review = False
         for step in history:
-            action = step.get("action", {})
+            action = step.get("action") or {}
             if action.get("tool_name") == "filestore" and action.get("method") == "read":
                 path = str(action.get("parameters", {}).get("path", ""))
                 if "q1-review" in path or "q1_review" in path:
@@ -431,7 +450,7 @@ class Grader:
 
         if not wrote_agenda:
             for step in history:
-                action = step.get("action", {})
+                action = step.get("action") or {}
                 if action.get("tool_name") == "filestore" and action.get("method") == "write":
                     path = str(action.get("parameters", {}).get("path", ""))
                     content = str(action.get("parameters", {}).get("content", ""))
@@ -456,7 +475,7 @@ class Grader:
             sent_emails = outbox
         else:
             for step in history:
-                action = step.get("action", {})
+                action = step.get("action") or {}
                 if action.get("tool_name") == "email" and action.get("method") == "send":
                     sent_emails.append(action.get("parameters", {}))
 
@@ -485,6 +504,9 @@ class Grader:
 
         breakdown["edge_case"] = edge_score
 
+        # Clamp all breakdown values
+        breakdown = {k: _clamp(v) for k, v in breakdown.items()}
+
         # Weighted score
         weights = {
             "project_lookup": 0.10, "team_query": 0.10, "calendar_check": 0.15,
@@ -493,4 +515,4 @@ class Grader:
         }
         score = sum(breakdown[k] * weights[k] for k in weights)
 
-        return {"score": round(score, 4), "breakdown": breakdown}
+        return {"score": _clamp(score), "breakdown": breakdown}

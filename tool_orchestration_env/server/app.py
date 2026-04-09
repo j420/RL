@@ -243,7 +243,7 @@ async def interact(payload: dict):
                 "step_number": obs.step_number,
                 "max_steps": obs.max_steps,
             },
-            "reward": 0.0,
+            "reward": 0.01,
             "done": False,
         }
 

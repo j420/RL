@@ -75,7 +75,7 @@ class ToolOrchestrationEnv(
             episode_id=payload.get("episode_id"),
             step_count=payload.get("step_count", 0),
             task_id=payload.get("task_id", ""),
-            total_reward=payload.get("total_reward", 0.0),
+            total_reward=payload.get("total_reward", 0.01),
             tools_called=payload.get("tools_called", []),
             done=payload.get("done", False),
         )
