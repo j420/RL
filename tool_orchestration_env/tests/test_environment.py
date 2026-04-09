@@ -280,14 +280,14 @@ class TestGraderDeterminism:
         r2 = grader.grade("hard", history)
         assert r1["score"] == r2["score"]
 
-    def test_scores_between_0_and_1(self):
+    def test_scores_strictly_between_0_and_1(self):
         grader = Grader()
         for task_id in ["easy", "medium", "hard"]:
             result = grader.grade(task_id, [])
-            assert 0.0 <= result["score"] <= 1.0
+            assert 0.0 < result["score"] < 1.0, f"Score must be strictly in (0, 1), got {result['score']} for {task_id}"
 
             result = grader.grade(task_id, [{"action": {"tool_name": "database", "method": "query", "parameters": {}}, "result": {}}])
-            assert 0.0 <= result["score"] <= 1.0
+            assert 0.0 < result["score"] < 1.0, f"Score must be strictly in (0, 1), got {result['score']} for {task_id}"
 
 
 # =====================================================================
@@ -326,9 +326,9 @@ class TestRewardFormula:
         env.reset(task_id=task_id)
         return env
 
-    def test_reward_starts_at_zero(self):
+    def test_reward_starts_near_zero(self):
         env = self._make_env()
-        assert env.state.total_reward == 0.0
+        assert env.state.total_reward <= 0.02
 
     def test_reward_increases_with_correct_steps(self):
         env = self._make_env()
@@ -377,13 +377,14 @@ class TestRewardFormula:
         ))
         assert obs.done
         assert obs.reward >= 0.9, f"Perfect episode should give reward >= 0.9, got {obs.reward}"
+        assert obs.reward < 1.0, f"Reward must be strictly < 1.0, got {obs.reward}"
 
-    def test_reward_always_between_0_and_1(self):
+    def test_reward_always_strictly_between_0_and_1(self):
         env = self._make_env()
         # Make several bad calls
         for _ in range(10):
             obs = env.step(ToolOrchestrationAction(tool_name="validator", method="validate", parameters={"data": {}, "schema_name": "email_format"}))
-            assert 0.0 <= obs.reward <= 1.0
+            assert 0.0 < obs.reward < 1.0, f"Reward must be strictly in (0, 1), got {obs.reward}"
 
 
 # =====================================================================
@@ -439,7 +440,7 @@ class TestEdgeCases:
         env.reset(task_id="medium")
         assert env.state.step_count == 0
         assert env.state.task_id == "medium"
-        assert env.state.total_reward == 0.0
+        assert env.state.total_reward <= 0.02
 
 
 # =====================================================================
