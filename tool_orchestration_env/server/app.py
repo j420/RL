@@ -98,6 +98,9 @@ class ScoreClampMiddleware(BaseHTTPMiddleware):
         body = b""
         async for chunk in response.body_iterator:
             body += chunk
+        # Strip headers that Starlette will recompute from the new body
+        _skip = {"content-length", "content-type"}
+        fwd_headers = {k: v for k, v in response.headers.items() if k.lower() not in _skip}
         try:
             data = json.loads(body)
             data = _clamp_scores_recursive(data)
@@ -105,14 +108,14 @@ class ScoreClampMiddleware(BaseHTTPMiddleware):
             return Response(
                 content=new_body,
                 status_code=response.status_code,
-                headers=dict(response.headers),
+                headers=fwd_headers,
                 media_type="application/json",
             )
         except Exception:
             return Response(
                 content=body,
                 status_code=response.status_code,
-                headers=dict(response.headers),
+                headers=fwd_headers,
             )
 
 
