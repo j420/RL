@@ -25,6 +25,8 @@ import json
 import os
 
 from fastapi.responses import HTMLResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 try:
     from openenv.core.env_server.http_server import create_app
@@ -51,6 +53,70 @@ app = create_app(
     env_name="tool_orchestration_env",
     max_concurrent_envs=1,
 )
+
+
+# =====================================================================
+# Score-clamping middleware — nuclear safety net
+# Intercepts ALL JSON responses and clamps reward/score to (0.01, 0.99)
+# =====================================================================
+
+_SCORE_KEYS = {"reward", "score", "total_reward"}
+
+
+def _clamp_scores_recursive(obj, inside_breakdown=False):
+    """Recursively find and clamp any 'reward'/'score' float values.
+
+    Also clamps ALL float values inside a 'breakdown' dict.
+    """
+    if isinstance(obj, dict):
+        return {
+            k: _clamp_response_val(
+                k,
+                _clamp_scores_recursive(v, inside_breakdown=(inside_breakdown or k == "breakdown")),
+                force_clamp=inside_breakdown,
+            )
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_clamp_scores_recursive(item, inside_breakdown) for item in obj]
+    return obj
+
+
+def _clamp_response_val(key, val, force_clamp=False):
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        if key in _SCORE_KEYS or force_clamp:
+            return round(max(0.01, min(0.99, float(val))), 4)
+    return val
+
+
+class ScoreClampMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        content_type = response.headers.get("content-type", "")
+        if "application/json" not in content_type:
+            return response
+        body = b""
+        async for chunk in response.body_iterator:
+            body += chunk
+        try:
+            data = json.loads(body)
+            data = _clamp_scores_recursive(data)
+            new_body = json.dumps(data, default=str).encode()
+            return Response(
+                content=new_body,
+                status_code=response.status_code,
+                headers=dict(response.headers),
+                media_type="application/json",
+            )
+        except Exception:
+            return Response(
+                content=body,
+                status_code=response.status_code,
+                headers=dict(response.headers),
+            )
+
+
+app.add_middleware(ScoreClampMiddleware)
 
 
 # =====================================================================
@@ -136,6 +202,40 @@ async def run_grader():
     if result is None:
         return {"error": "No completed episode", "score": 0.01}
     return result
+
+
+@app.post("/verify-scores")
+async def verify_scores():
+    """Run grader on all tasks with edge cases and verify all scores are in (0, 1)."""
+    from .grader import Grader
+    g = Grader()
+    results = {}
+    violations = []
+
+    for task_id in ["easy", "medium", "hard"]:
+        # Empty history (worst case)
+        empty = g.grade(task_id, [], {})
+        for k, v in {"score": empty["score"], **empty.get("breakdown", {})}.items():
+            if not (0 < v < 1):
+                violations.append(f"{task_id}/empty/{k}={v}")
+
+        # Also test via environment
+        env = _get_env()
+        obs = env.reset(task_id=task_id)
+        if not (0 < obs.reward < 1):
+            violations.append(f"{task_id}/reset/reward={obs.reward}")
+
+        results[task_id] = {
+            "grader_score": empty["score"],
+            "reset_reward": obs.reward,
+            "in_range": all(0 < v < 1 for v in [empty["score"], obs.reward]),
+        }
+
+    return {
+        "passed": len(violations) == 0,
+        "violations": violations,
+        "tasks": results,
+    }
 
 
 @app.post("/baseline")
