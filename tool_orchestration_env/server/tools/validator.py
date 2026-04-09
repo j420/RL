@@ -33,6 +33,31 @@ _SCHEMAS: Dict[str, Dict[str, Any]] = {
             "body": str,
         },
     },
+    "employee_data": {
+        "required_fields": ["name", "email", "department"],
+        "field_types": {
+            "name": str,
+            "email": str,
+            "department": str,
+        },
+    },
+    "invoice_data": {
+        "required_fields": ["vendor", "amount", "category"],
+        "field_types": {
+            "vendor": str,
+            "amount": (int, float),
+            "category": str,
+        },
+    },
+    "calendar_event": {
+        "required_fields": ["title", "attendees", "start", "end"],
+        "field_types": {
+            "title": str,
+            "attendees": list,
+            "start": str,
+            "end": str,
+        },
+    },
 }
 
 

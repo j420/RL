@@ -467,3 +467,200 @@ class TestCompletionHeuristic:
         # 4th email completes: 1 database + 4 emails matches optimal
         obs = env.step(ToolOrchestrationAction(tool_name="email", method="send", parameters={"to": "user3@x.com", "subject": "S", "body": "B"}))
         assert obs.done is True
+
+
+# =====================================================================
+# New Feature Tests: Calculator Statistics, Email Validation, Grader Improvements
+# =====================================================================
+
+
+class TestCalculatorStatistics:
+    def test_mean(self):
+        calc = CalculatorTool()
+        result = calc.execute("compute", {"expression": "mean([10, 20, 30])"})
+        assert result["result"] == 20.0
+
+    def test_median(self):
+        calc = CalculatorTool()
+        result = calc.execute("compute", {"expression": "median([1, 3, 5, 7, 9])"})
+        assert result["result"] == 5
+
+    def test_stdev(self):
+        calc = CalculatorTool()
+        result = calc.execute("compute", {"expression": "stdev([2, 4, 4, 4, 5, 5, 7, 9])"})
+        assert abs(result["result"] - 2.138) < 0.01
+
+    def test_variance(self):
+        calc = CalculatorTool()
+        result = calc.execute("compute", {"expression": "variance([2, 4, 4, 4, 5, 5, 7, 9])"})
+        assert result["result"] > 0
+
+
+class TestEmailValidation:
+    def test_invalid_email_format_rejected(self):
+        email = EmailTool()
+        email.reset()
+        result = email.execute("send", {"to": "not-an-email", "subject": "Hi", "body": "Hello"})
+        assert "error" in result
+        assert "Invalid email" in result["error"]
+
+    def test_valid_email_accepted(self):
+        email = EmailTool()
+        email.reset()
+        result = email.execute("send", {"to": "user@acme.com", "subject": "Hi", "body": "Hello"})
+        assert result["status"] == "sent"
+
+
+class TestValidatorNewSchemas:
+    def test_employee_data_valid(self):
+        v = ValidatorTool()
+        result = v.execute("validate", {
+            "data": {"name": "Alice", "email": "alice@x.com", "department": "Eng"},
+            "schema_name": "employee_data",
+        })
+        assert result["valid"] is True
+
+    def test_employee_data_missing_field(self):
+        v = ValidatorTool()
+        result = v.execute("validate", {
+            "data": {"name": "Alice"},
+            "schema_name": "employee_data",
+        })
+        assert result["valid"] is False
+
+    def test_invoice_data_valid(self):
+        v = ValidatorTool()
+        result = v.execute("validate", {
+            "data": {"vendor": "ACME", "amount": 100.0, "category": "Software"},
+            "schema_name": "invoice_data",
+        })
+        assert result["valid"] is True
+
+    def test_calendar_event_valid(self):
+        v = ValidatorTool()
+        result = v.execute("validate", {
+            "data": {"title": "Meeting", "attendees": ["u1"], "start": "2026-04-03T10:00", "end": "2026-04-03T11:00"},
+            "schema_name": "calendar_event",
+        })
+        assert result["valid"] is True
+
+
+class TestGraderImprovements:
+    def test_easy_sql_semantic_validation(self):
+        """Grader should give higher score for proper WHERE clause with date comparison."""
+        grader = Grader()
+        # Good query with proper WHERE
+        good_history = [
+            {"action": {"tool_name": "database", "method": "query", "parameters": {"sql": "SELECT * FROM employees WHERE hire_date > '2026-03-01'"}},
+             "result": {"rows": [{"email": "carol.johnson@acme.com"}, {"email": "david.kim@acme.com"}, {"email": "hannah.davis@acme.com"}, {"email": "lisa.tanaka@acme.com"}], "row_count": 4}},
+        ]
+        # Bad query without proper filter
+        bad_history = [
+            {"action": {"tool_name": "database", "method": "query", "parameters": {"sql": "SELECT * FROM employees"}},
+             "result": {"rows": [{"email": "a@b.com"}] * 15, "row_count": 15}},
+        ]
+        good_result = grader.grade("easy", good_history)
+        bad_result = grader.grade("easy", bad_history)
+        assert good_result["breakdown"]["correct_query"] > bad_result["breakdown"]["correct_query"]
+
+    def test_easy_duplicate_email_penalty(self):
+        """Sending duplicate emails should reduce score."""
+        grader = Grader()
+        # Normal: 4 unique recipients
+        normal_states = {"email_outbox": [
+            {"to": "carol.johnson@acme.com", "subject": "Welcome Carol", "body": "Engineering"},
+            {"to": "david.kim@acme.com", "subject": "Welcome David", "body": "Engineering"},
+            {"to": "hannah.davis@acme.com", "subject": "Welcome Hannah", "body": "Marketing"},
+            {"to": "lisa.tanaka@acme.com", "subject": "Welcome Lisa", "body": "Finance"},
+        ]}
+        # Duplicate: same person twice
+        dup_states = {"email_outbox": [
+            {"to": "carol.johnson@acme.com", "subject": "Welcome Carol", "body": "Engineering"},
+            {"to": "carol.johnson@acme.com", "subject": "Welcome Carol", "body": "Engineering"},
+            {"to": "david.kim@acme.com", "subject": "Welcome David", "body": "Engineering"},
+            {"to": "hannah.davis@acme.com", "subject": "Welcome Hannah", "body": "Marketing"},
+            {"to": "lisa.tanaka@acme.com", "subject": "Welcome Lisa", "body": "Finance"},
+        ]}
+        normal_result = grader.grade("easy", [], normal_states)
+        dup_result = grader.grade("easy", [], dup_states)
+        assert normal_result["breakdown"]["correct_recipients"] > dup_result["breakdown"]["correct_recipients"]
+
+    def test_medium_math_result_verification(self):
+        """Grader should verify group_sum results match expected totals."""
+        grader = Grader()
+        # Correct calculation
+        correct_history = [
+            {"action": {"tool_name": "calculator", "method": "group_sum", "parameters": {"data": [], "group_by": "category", "aggregate": "amount"}},
+             "result": {"result": {"Software": 8940.0, "Travel": 3200.0, "Office Supplies": 1450.0, "Marketing": 5600.0}}},
+        ]
+        # Wrong calculation
+        wrong_history = [
+            {"action": {"tool_name": "calculator", "method": "group_sum", "parameters": {"data": [], "group_by": "category", "aggregate": "amount"}},
+             "result": {"result": {"Software": 1000.0, "Travel": 500.0}}},
+        ]
+        correct_result = grader.grade("medium", correct_history)
+        wrong_result = grader.grade("medium", wrong_history)
+        assert correct_result["breakdown"]["correct_calculation"] > wrong_result["breakdown"]["correct_calculation"]
+
+    def test_medium_attachment_validation(self):
+        """Grader should verify attachment path matches written file."""
+        grader = Grader()
+        history = [
+            {"action": {"tool_name": "filestore", "method": "write", "parameters": {"path": "reports/march-2026-expenses.md", "content": "Software 8940\nTravel 3200\nOffice Supplies 1450\nMarketing 5600\nTotal 19190"}}, "result": {"status": "written"}},
+        ]
+        # Correct attachment
+        good_states = {
+            "email_outbox": [{"to": "finance@acme.com", "subject": "March Expense Report", "body": "See report", "attachment": "reports/march-2026-expenses.md"}],
+            "files": {"reports/march-2026-expenses.md": "Software 8940\nTravel 3200\nOffice Supplies 1450\nMarketing 5600\nTotal 19190"},
+        }
+        # No attachment
+        bad_states = {
+            "email_outbox": [{"to": "finance@acme.com", "subject": "March Expense Report", "body": "See report"}],
+            "files": {"reports/march-2026-expenses.md": "Software 8940\nTravel 3200\nOffice Supplies 1450\nMarketing 5600\nTotal 19190"},
+        }
+        good_result = grader.grade("medium", history, good_states)
+        bad_result = grader.grade("medium", history, bad_states)
+        assert good_result["breakdown"]["correct_email"] > bad_result["breakdown"]["correct_email"]
+
+    def test_hard_meeting_time_verification(self):
+        """Grader should verify meeting is scheduled at correct time slot."""
+        grader = Grader()
+        # Correct time (April 3, 10:00-11:00)
+        correct_history = [
+            {"action": {"tool_name": "calendar", "method": "create_event", "parameters": {"title": "Q2 Review", "attendees": ["user_01", "user_02"], "start": "2026-04-03T10:00", "end": "2026-04-03T11:00"}}, "result": {"status": "created"}},
+        ]
+        # Wrong time
+        wrong_history = [
+            {"action": {"tool_name": "calendar", "method": "create_event", "parameters": {"title": "Q2 Review", "attendees": ["user_01", "user_02"], "start": "2026-04-05T14:00", "end": "2026-04-05T15:00"}}, "result": {"status": "created"}},
+        ]
+        correct_result = grader.grade("hard", correct_history)
+        wrong_result = grader.grade("hard", wrong_history)
+        assert correct_result["breakdown"]["meeting_created"] > wrong_result["breakdown"]["meeting_created"]
+
+    def test_all_scores_remain_in_bounds(self):
+        """All grader scores must remain strictly between 0 and 1 after improvements."""
+        grader = Grader()
+        test_cases = [
+            ("easy", []),
+            ("medium", []),
+            ("hard", []),
+            ("easy", [{"action": {"tool_name": "email", "method": "send", "parameters": {"to": "x@y.com", "subject": "s", "body": "b"}}, "result": {"status": "sent"}}]),
+        ]
+        for task_id, history in test_cases:
+            result = grader.grade(task_id, history)
+            assert 0.0 < result["score"] < 1.0, f"Score out of bounds for {task_id}: {result['score']}"
+            for k, v in result["breakdown"].items():
+                assert 0.0 < v < 1.0, f"Breakdown {k} out of bounds for {task_id}: {v}"
+
+
+class TestContextualStepRewards:
+    def test_quality_bonus_for_successful_query(self):
+        """Successful database query with rows should get quality bonus."""
+        env = ToolOrchestrationEnvironment()
+        env.reset(task_id="easy")
+        obs1 = env.step(ToolOrchestrationAction(
+            tool_name="database", method="query",
+            parameters={"sql": "SELECT * FROM employees WHERE hire_date > '2026-03-01'"},
+        ))
+        # Reward should reflect both sequence match + quality bonus
+        assert obs1.reward > 0.01

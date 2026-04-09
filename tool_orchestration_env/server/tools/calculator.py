@@ -6,6 +6,7 @@ No external dependencies — uses only Python stdlib.
 
 import math
 import re
+import statistics
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -32,6 +33,11 @@ _SAFE_NAMES: Dict[str, Any] = {
     "sin": math.sin,
     "cos": math.cos,
     "tan": math.tan,
+    # statistics module
+    "mean": statistics.mean,
+    "median": statistics.median,
+    "stdev": statistics.stdev,
+    "variance": statistics.variance,
 }
 
 

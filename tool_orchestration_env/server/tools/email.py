@@ -4,8 +4,11 @@ Provides inbox (seeded with 5 emails) and outbox for sending.
 All operations are in-memory — no external services.
 """
 
+import re
 import uuid
 from typing import Any, Dict, List
+
+_EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 
 
 class EmailTool:
@@ -80,6 +83,8 @@ class EmailTool:
 
         if not to:
             return {"error": "Missing required parameter 'to'"}
+        if not _EMAIL_RE.match(to):
+            return {"error": f"Invalid email address format: '{to}'"}
         if not subject:
             return {"error": "Missing required parameter 'subject'"}
         if not body:

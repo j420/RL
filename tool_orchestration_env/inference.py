@@ -39,6 +39,7 @@ Available tools and their methods:
 1. **database**
    - query(sql): Execute a SELECT query. Returns {rows, row_count}
    - insert(table, data): Insert a row. Returns {inserted, id}
+   Tables: employees (id, name, email, department, hire_date, salary), invoices (id, vendor, amount, category, date, status), projects (id, name, team_lead_email, department, status, deadline)
 
 2. **email**
    - send(to, subject, body, attachment): Send an email. Returns {status, message_id}
@@ -69,6 +70,34 @@ IMPORTANT RULES:
 - Look at the workspace to see results from your previous tool calls — use that data in subsequent calls.
 - If a tool returns an error, adapt your approach rather than retrying the same call.
 - Plan your tool calls efficiently to complete the task in as few steps as possible."""
+
+# Task-specific guidance to help the LLM make better tool calls
+TASK_HINTS = {
+    "easy": (
+        "STRATEGY: 1) Query employees with hire_date > '2026-03-01' to find new hires. "
+        "2) For EACH new hire, send a personalized welcome email to their email address. "
+        "Subject must include their name (e.g., 'Welcome to the team, Carol Johnson!'). "
+        "Body must mention their department. Send exactly one email per new hire."
+    ),
+    "medium": (
+        "STRATEGY: 1) Query all invoices from March 2026 (WHERE date LIKE '2026-03%'). "
+        "2) Use calculator.group_sum with the invoice data to compute totals per category. "
+        "3) Write a markdown report to 'reports/march-2026-expenses.md' with a table of "
+        "category totals and a grand total row. Use markdown table format with | and ---. "
+        "4) Email the report to finance@acme.com with subject 'March 2026 Expense Report' "
+        "and set attachment to the file path 'reports/march-2026-expenses.md'."
+    ),
+    "hard": (
+        "STRATEGY: 1) Query projects table for 'Project Alpha' to find team_lead_email and department. "
+        "2) Query employees in that department to get team member user IDs. "
+        "3) Use calendar.find_free_slots for all team members (user_01 through user_05 as needed). "
+        "If a user returns CalendarServiceTimeout, note them as 'unconfirmed' and proceed with others. "
+        "4) Create a calendar event at the first available common slot. "
+        "5) Read 'projects/q1-review.md' for context, then write a meeting agenda to "
+        "'meetings/q2-review-agenda.md' referencing Q1 accomplishments and Q2 priorities. "
+        "6) Email the agenda to attendees mentioning the meeting time and any unconfirmed members."
+    ),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -119,10 +148,19 @@ def run_episode(
     success = False
 
     try:
+        # Get task-specific hints
+        task_hint = TASK_HINTS.get(task_id, "")
+
         while not result.done:
             # Build user message with full context
             user_msg = (
                 f"**Task:** {obs.task_description}\n\n"
+            )
+
+            if task_hint and obs.step_number == 0:
+                user_msg += f"**Guidance:** {task_hint}\n\n"
+
+            user_msg += (
                 f"**Step:** {obs.step_number}/{obs.max_steps}\n\n"
                 f"**Last tool response:**\n```json\n{json.dumps(obs.tool_response, indent=2, default=str)}\n```\n\n"
             )
