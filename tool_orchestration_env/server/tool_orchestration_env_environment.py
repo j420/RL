@@ -251,7 +251,7 @@ class ToolOrchestrationEnvironment(Environment):
     # ----- Private helpers -----
 
     def _calculate_step_reward(self, action: ToolOrchestrationAction, result: Dict[str, Any]) -> float:
-        """Per-step partial reward signal."""
+        """Per-step partial reward signal with contextual quality bonuses."""
         step_reward = 0.0
         optimal = self._task.optimal_tool_sequence
 
@@ -263,10 +263,17 @@ class ToolOrchestrationEnvironment(Environment):
                 step_reward += 0.1  # Exact match
             elif action.tool_name == expected.split(".")[0]:
                 step_reward += 0.05  # Right tool, wrong method
+        else:
+            # Beyond optimal sequence — still reward valid tool usage
+            actual = f"{action.tool_name}.{action.method}"
+            if any(actual == opt for opt in optimal):
+                step_reward += 0.03  # Valid tool, just out of order
 
         # Reward for successful execution (no error)
         if "error" not in result:
             step_reward += 0.05
+            # Contextual quality bonus based on result content
+            step_reward += self._quality_bonus(action, result)
         else:
             step_reward -= 0.02  # Penalty for errors
 
@@ -275,7 +282,28 @@ class ToolOrchestrationEnvironment(Environment):
             step_reward -= 0.05
 
         # Cap step reward
-        return max(-0.1, min(0.2, step_reward))
+        return max(-0.1, min(0.25, step_reward))
+
+    def _quality_bonus(self, action: ToolOrchestrationAction, result: Dict[str, Any]) -> float:
+        """Contextual bonus for result quality — rewards meaningful data retrieval."""
+        bonus = 0.0
+        if action.tool_name == "database" and action.method == "query":
+            row_count = result.get("row_count", 0)
+            if row_count > 0:
+                bonus += 0.02  # Got actual data back
+        elif action.tool_name == "calculator" and action.method == "group_sum":
+            if isinstance(result.get("result"), dict) and len(result["result"]) > 0:
+                bonus += 0.02  # Got grouped results
+        elif action.tool_name == "email" and action.method == "send":
+            if result.get("status") == "sent":
+                bonus += 0.01  # Successfully sent
+        elif action.tool_name == "filestore" and action.method == "write":
+            if result.get("status") == "written":
+                bonus += 0.01
+        elif action.tool_name == "calendar" and action.method == "create_event":
+            if result.get("status") == "created":
+                bonus += 0.02
+        return bonus
 
     def _is_duplicate_call(self, action: ToolOrchestrationAction) -> bool:
         """Check if this exact call was made before."""
@@ -292,17 +320,22 @@ class ToolOrchestrationEnvironment(Environment):
         return False
 
     def _check_completion(self) -> bool:
-        """Heuristic: task is complete when tool call counts match the optimal sequence.
+        """Heuristic: task is complete when tool call pattern matches expected workflow.
 
-        Requires that each tool appears at least as many times as in the
-        optimal sequence before declaring completion. This prevents premature
-        completion (e.g., sending 1 email when 4 are needed).
+        Checks two conditions:
+        1. Each tool appears at least as many times as in the optimal sequence
+        2. The final tool type in the optimal sequence has been called (ensures
+           the workflow reached its natural conclusion, e.g., email.send)
+
+        This prevents premature completion (e.g., sending 1 email when 4 are
+        needed) and ensures the agent reached the end of the workflow.
         """
         if not self._task:
             return False
 
-        # Count required tool occurrences from optimal sequence
         from collections import Counter
+
+        # Count required tool.method occurrences from optimal sequence
         required_counts = Counter()
         for entry in self._task.optimal_tool_sequence:
             tool = entry.split(".")[0]
@@ -315,7 +348,19 @@ class ToolOrchestrationEnvironment(Environment):
         for tool, count in required_counts.items():
             if actual_counts.get(tool, 0) < count:
                 return False
-        return True
+
+        # The last tool.method in the optimal sequence must have been called
+        final_tool_method = self._task.optimal_tool_sequence[-1]
+        final_tool = final_tool_method.split(".")[0]
+        final_method = final_tool_method.split(".")[1] if "." in final_tool_method else ""
+        found_final = False
+        for entry in self._episode_history:
+            action = entry.get("action", {})
+            if action.get("tool_name") == final_tool and action.get("method") == final_method:
+                found_final = True
+                break
+
+        return found_final
 
     def _run_grader(self) -> None:
         """Run the grader on the current episode."""

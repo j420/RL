@@ -79,33 +79,56 @@ class Grader:
         }
 
         # --- correct_query (0.25) ---
-        # Did the agent query for employees with hire_date filter?
+        # Check SQL semantics: must query employees with proper date filter
         query_score = 0.0
         for step in history:
             action = step.get("action") or {}
+            result = step.get("result") or {}
             if action.get("tool_name") == "database" and action.get("method") == "query":
-                sql = str(action.get("parameters", {}).get("sql", "")).upper()
-                if "HIRE_DATE" in sql and ("2026-03" in str(action.get("parameters", {}).get("sql", "")) or "2026-03-01" in str(action.get("parameters", {}).get("sql", ""))):
-                    query_score = 1.0
+                sql_raw = str(action.get("parameters", {}).get("sql", ""))
+                sql = sql_raw.upper()
+                has_employee_table = "EMPLOYEE" in sql
+                has_date_filter = (
+                    "HIRE_DATE" in sql
+                    and any(op in sql for op in [">", ">=", "BETWEEN", "AFTER"])
+                    and ("2026-03" in sql_raw or "2026-03-01" in sql_raw)
+                )
+                # Verify query actually returned correct results
+                rows = result.get("rows", [])
+                returned_emails = {r.get("email", "") for r in rows if isinstance(r, dict)}
+                expected_set_emails = set(expected_emails.keys())
+
+                if has_employee_table and has_date_filter:
+                    query_score = 0.7
+                    # Bonus: verify result correctness
+                    if returned_emails >= expected_set_emails:
+                        query_score = 1.0
+                    elif len(returned_emails & expected_set_emails) > 0:
+                        query_score = 0.85
                     break
-                elif "EMPLOYEE" in sql:
-                    query_score = 0.5  # Queried employees but no date filter
+                elif has_employee_table:
+                    query_score = 0.4  # Queried employees but no date filter
+                    if returned_emails >= expected_set_emails:
+                        query_score = 0.6  # Got right results anyway
                     break
         breakdown["correct_query"] = query_score
 
-        # --- correct_recipients (0.35) ---
+        # --- correct_recipients (0.30) ---
         # Check emails sent via outbox or action history
         sent_to = set()
+        sent_to_list = []  # Track order for duplicate detection
         outbox = tool_states.get("email_outbox", [])
         if outbox:
             for email in outbox:
                 sent_to.add(email.get("to", ""))
+                sent_to_list.append(email.get("to", ""))
         else:
-            # Fall back to action history
             for step in history:
                 action = step.get("action") or {}
                 if action.get("tool_name") == "email" and action.get("method") == "send":
-                    sent_to.add(action.get("parameters", {}).get("to", ""))
+                    to = action.get("parameters", {}).get("to", "")
+                    sent_to.add(to)
+                    sent_to_list.append(to)
 
         expected_set = set(expected_emails.keys())
         correct_recipients = sent_to & expected_set
@@ -120,8 +143,14 @@ class Grader:
         else:
             breakdown["correct_recipients"] = 0.0
 
+        # Penalty for duplicate emails to same recipient
+        from collections import Counter
+        dup_count = sum(1 for c in Counter(sent_to_list).values() if c > 1)
+        if dup_count > 0:
+            breakdown["correct_recipients"] = max(0.0, breakdown["correct_recipients"] - 0.15 * dup_count)
+
         # --- correct_subjects (0.20) ---
-        # Check that subjects contain employee names
+        # Check that subjects contain employee names and "welcome" keyword
         subject_score = 0.0
         subjects = []
         if outbox:
@@ -137,18 +166,22 @@ class Grader:
                         subjects.append((to, action.get("parameters", {}).get("subject", "")))
 
         names_found = 0
+        welcome_found = 0
         for to, subject in subjects:
             name, _ = expected_emails.get(to, ("", ""))
-            # Check if name (or first name) appears in subject
             if name and (name.lower() in subject.lower() or name.split()[0].lower() in subject.lower()):
                 names_found += 1
+            if "welcome" in subject.lower():
+                welcome_found += 1
 
         if len(subjects) > 0:
-            subject_score = names_found / len(expected_set)
+            name_ratio = names_found / len(expected_set)
+            welcome_ratio = welcome_found / len(subjects)
+            subject_score = name_ratio * 0.7 + welcome_ratio * 0.3
         breakdown["correct_subjects"] = min(1.0, subject_score)
 
-        # --- correct_body (0.20) ---
-        # Check that bodies mention the employee's department
+        # --- correct_body (0.25) ---
+        # Check that bodies mention the employee's department and name
         body_score = 0.0
         bodies = []
         if outbox:
@@ -164,20 +197,25 @@ class Grader:
                         bodies.append((to, action.get("parameters", {}).get("body", "")))
 
         depts_found = 0
+        names_in_body = 0
         for to, body in bodies:
-            _, dept = expected_emails.get(to, ("", ""))
+            name, dept = expected_emails.get(to, ("", ""))
             if dept and dept.lower() in body.lower():
                 depts_found += 1
+            if name and (name.lower() in body.lower() or name.split()[0].lower() in body.lower()):
+                names_in_body += 1
 
         if len(bodies) > 0:
-            body_score = depts_found / len(expected_set)
+            dept_ratio = depts_found / len(expected_set)
+            name_ratio = names_in_body / len(expected_set)
+            body_score = dept_ratio * 0.7 + name_ratio * 0.3
         breakdown["correct_body"] = min(1.0, body_score)
 
         # Clamp all breakdown values
         breakdown = {k: _clamp(v) for k, v in breakdown.items()}
 
         # Weighted score
-        weights = {"correct_query": 0.25, "correct_recipients": 0.35, "correct_subjects": 0.20, "correct_body": 0.20}
+        weights = {"correct_query": 0.25, "correct_recipients": 0.30, "correct_subjects": 0.20, "correct_body": 0.25}
         score = sum(breakdown[k] * weights[k] for k in weights)
 
         return {"score": _clamp(score), "breakdown": breakdown}
@@ -199,33 +237,69 @@ class Grader:
         expected_grand_total = 19190.0
 
         # --- correct_query (0.15) ---
+        # Validate SQL semantics: must query invoices with March 2026 date filter
         query_score = 0.0
+        query_returned_correct = False
         for step in history:
             action = step.get("action") or {}
+            result = step.get("result") or {}
             if action.get("tool_name") == "database" and action.get("method") == "query":
-                sql = str(action.get("parameters", {}).get("sql", "")).upper()
+                sql_raw = str(action.get("parameters", {}).get("sql", ""))
+                sql = sql_raw.upper()
                 if "INVOICE" in sql:
-                    if "2026-03" in str(action.get("parameters", {}).get("sql", "")) or "MARCH" in sql:
-                        query_score = 1.0
+                    has_date_filter = (
+                        "2026-03" in sql_raw
+                        or "MARCH" in sql
+                        or ("DATE" in sql and "2026" in sql_raw)
+                    )
+                    # Verify query returned reasonable data
+                    row_count = result.get("row_count", 0)
+                    if has_date_filter:
+                        query_score = 0.7
+                        if row_count == 47:  # All March invoices
+                            query_score = 1.0
+                        elif row_count > 0:
+                            query_score = 0.85
                     else:
-                        query_score = 0.7  # Queried invoices but no month filter
+                        query_score = 0.5  # Queried invoices but no month filter
                     break
         breakdown["correct_query"] = query_score
 
-        # --- correct_calculation (0.20) ---
+        # --- correct_calculation (0.25) ---
+        # Verify the calculation results match expected totals
         calc_score = 0.0
         for step in history:
             action = step.get("action") or {}
+            result = step.get("result") or {}
             if action.get("tool_name") == "calculator":
                 if action.get("method") == "group_sum":
-                    calc_score = 1.0
+                    calc_score = 0.5  # Used correct method
+                    # Verify results match expected totals
+                    group_result = result.get("result", {})
+                    if isinstance(group_result, dict):
+                        correct_totals = 0
+                        for cat, expected_val in expected_totals.items():
+                            actual = group_result.get(cat, None)
+                            if actual is not None and abs(float(actual) - expected_val) < 0.01:
+                                correct_totals += 1
+                        if correct_totals == 4:
+                            calc_score = 1.0
+                        elif correct_totals > 0:
+                            calc_score = 0.5 + (correct_totals / 4) * 0.4
                     break
                 elif action.get("method") == "compute":
-                    calc_score = 0.5  # Used calculator but not group_sum
+                    # Check if compute result matches any expected value
+                    compute_result = result.get("result")
+                    if compute_result is not None:
+                        if abs(float(compute_result) - expected_grand_total) < 0.01:
+                            calc_score = 0.6  # Computed grand total directly
+                        else:
+                            calc_score = 0.3  # Used calculator but unclear result
         breakdown["correct_calculation"] = calc_score
 
-        # --- correct_report (0.25) ---
+        # --- correct_report (0.20) ---
         report_score = 0.0
+        report_path = ""
         files = tool_states.get("files", {})
         report_content = ""
 
@@ -233,15 +307,16 @@ class Grader:
         for path, content in files.items():
             if "march" in path.lower() and "expense" in path.lower():
                 report_content = content
-                report_score = 0.3  # File exists
+                report_path = path
+                report_score = 0.3  # File with correct name
                 break
-            elif "report" in path.lower():
+            elif "report" in path.lower() or "expense" in path.lower():
                 report_content = content
+                report_path = path
                 report_score = 0.2
                 break
 
         if not report_content:
-            # Check action history for filestore.write
             for step in history:
                 action = step.get("action") or {}
                 if action.get("tool_name") == "filestore" and action.get("method") == "write":
@@ -249,11 +324,11 @@ class Grader:
                     content = action.get("parameters", {}).get("content", "")
                     if content:
                         report_content = content
-                        report_score = 0.3
+                        report_path = path
+                        report_score = 0.2
                         break
 
         if report_content:
-            # Check content quality
             content_lower = report_content.lower()
             categories_found = sum(
                 1 for cat in expected_totals if cat.lower() in content_lower
@@ -261,10 +336,10 @@ class Grader:
             if categories_found == 4:
                 report_score = max(report_score, 0.6)
 
-            # Check if totals appear
+            # Check if totals appear (verify exact values)
             totals_found = sum(
                 1 for total in expected_totals.values()
-                if str(int(total)) in report_content or str(total) in report_content
+                if str(int(total)) in report_content or f"{total:.2f}" in report_content or str(total) in report_content
             )
             if totals_found == 4:
                 report_score = max(report_score, 0.8)
@@ -291,11 +366,17 @@ class Grader:
             to = str(email.get("to", "")).lower()
             subject = str(email.get("subject", "")).lower()
             if "finance" in to:
-                email_score = 0.5  # Correct recipient
+                email_score = 0.4  # Correct recipient
                 if "expense" in subject or "march" in subject:
-                    email_score = 0.8  # Correct subject
-                if email.get("attachment"):
-                    email_score = 1.0  # Has attachment
+                    email_score = 0.6  # Correct subject
+                attachment = email.get("attachment", "")
+                if attachment:
+                    email_score = 0.8  # Has attachment
+                    # Verify attachment path matches the report file
+                    if report_path and attachment == report_path:
+                        email_score = 1.0  # Attachment matches actual report
+                    elif report_path and ("expense" in str(attachment).lower() or "report" in str(attachment).lower()):
+                        email_score = 0.9  # Reasonable attachment path
                 break
 
         breakdown["correct_email"] = email_score
@@ -305,10 +386,13 @@ class Grader:
         if report_content:
             content_lower = report_content.lower()
             checks = [
-                any(cat.lower() in content_lower for cat in expected_totals),  # Has categories
+                all(cat.lower() in content_lower for cat in expected_totals),  # Has ALL categories
                 str(int(expected_grand_total)) in report_content,  # Has grand total
-                "software" in content_lower and "travel" in content_lower,  # Multiple categories
-                "|" in report_content or "---" in report_content or "total" in content_lower,  # Table/structure
+                "software" in content_lower and "travel" in content_lower
+                and "office" in content_lower and "marketing" in content_lower,  # All 4 categories
+                "|" in report_content or "---" in report_content,  # Markdown table formatting
+                "total" in content_lower,  # Mentions total
+                report_content.count("\n") >= 4,  # Multi-line report (not one-liner)
             ]
             completeness_score = sum(checks) / len(checks)
 
@@ -319,7 +403,7 @@ class Grader:
 
         # Weighted score
         weights = {
-            "correct_query": 0.15, "correct_calculation": 0.20, "correct_report": 0.25,
+            "correct_query": 0.15, "correct_calculation": 0.25, "correct_report": 0.20,
             "correct_email": 0.20, "report_completeness": 0.20,
         }
         score = sum(breakdown[k] * weights[k] for k in weights)
@@ -412,15 +496,28 @@ class Grader:
         breakdown["error_handling"] = error_score
 
         # --- meeting_created (0.15) ---
+        # Verify meeting is scheduled at the correct time slot (April 3, 10:00-11:00)
         meeting_score = 0.0
+        meeting_time_correct = False
         for step in history:
             action = step.get("action") or {}
             if action.get("tool_name") == "calendar" and action.get("method") == "create_event":
                 params = action.get("parameters", {})
                 if params.get("title") and params.get("attendees") and params.get("start"):
-                    meeting_score = 1.0
-                else:
-                    meeting_score = 0.5
+                    meeting_score = 0.6  # Event created with required fields
+                    # Check if time matches the known free slot
+                    start = str(params.get("start", ""))
+                    end = str(params.get("end", ""))
+                    if "2026-04-03" in start and "10:00" in start:
+                        meeting_score = 0.8  # Correct start time
+                        if "11:00" in end:
+                            meeting_score = 1.0  # Correct start AND end
+                    # Check attendees include engineering team
+                    attendees = params.get("attendees", [])
+                    if isinstance(attendees, list) and len(attendees) >= 2:
+                        meeting_time_correct = True
+                elif params.get("title"):
+                    meeting_score = 0.3  # Event created but incomplete
                 break
         breakdown["meeting_created"] = meeting_score
 
@@ -436,16 +533,14 @@ class Grader:
                     read_review = True
                     break
 
-        # Check if agent wrote an agenda file
+        # Check if agent wrote an agenda file — verify content quality
         wrote_agenda = False
+        agenda_content = ""
         files = tool_states.get("files", {})
         for path, content in files.items():
-            if "agenda" in path.lower() or "q2" in path.lower():
+            if "agenda" in path.lower() or ("q2" in path.lower() and "review" in path.lower()):
                 wrote_agenda = True
-                if read_review and ("q1" in content.lower() or "accomplishment" in content.lower() or "v2.0" in content.lower()):
-                    agenda_score = 1.0
-                else:
-                    agenda_score = 0.5
+                agenda_content = content
                 break
 
         if not wrote_agenda:
@@ -454,16 +549,34 @@ class Grader:
                 if action.get("tool_name") == "filestore" and action.get("method") == "write":
                     path = str(action.get("parameters", {}).get("path", ""))
                     content = str(action.get("parameters", {}).get("content", ""))
-                    if "agenda" in path.lower() or "q2" in path.lower():
+                    if "agenda" in path.lower() or ("q2" in path.lower() and "review" in path.lower()):
                         wrote_agenda = True
-                        if read_review and ("q1" in content.lower() or "accomplishment" in content.lower()):
-                            agenda_score = 1.0
-                        else:
-                            agenda_score = 0.5
+                        agenda_content = content
                         break
 
-        if read_review and not wrote_agenda:
-            agenda_score = 0.3  # At least read the source material
+        if wrote_agenda and agenda_content:
+            content_lower = agenda_content.lower()
+            # Check for specific Q1 review items that show the agent used the source material
+            q1_refs = [
+                "v2.0" in content_lower or "shipped" in content_lower,
+                "latency" in content_lower or "api" in content_lower,
+                "mobile" in content_lower or "app" in content_lower,
+                "series b" in content_lower or "hiring" in content_lower,
+            ]
+            q1_ref_count = sum(q1_refs)
+
+            if read_review and q1_ref_count >= 2:
+                agenda_score = 1.0  # Read source + references specific items
+            elif read_review and q1_ref_count >= 1:
+                agenda_score = 0.8
+            elif read_review:
+                agenda_score = 0.6  # Read source but generic agenda
+            elif q1_ref_count >= 1:
+                agenda_score = 0.5  # Somehow referenced items without reading
+            else:
+                agenda_score = 0.3  # Wrote agenda but no Q1 references
+        elif read_review and not wrote_agenda:
+            agenda_score = 0.2  # At least read the source material
 
         breakdown["agenda_quality"] = agenda_score
 
@@ -480,27 +593,50 @@ class Grader:
                     sent_emails.append(action.get("parameters", {}))
 
         if sent_emails:
-            email_score = 0.5  # At least one email sent
+            email_score = 0.3  # At least one email sent
             for email in sent_emails:
                 body = str(email.get("body", "")).lower()
                 subject = str(email.get("subject", "")).lower()
-                if "q2" in subject or "review" in subject or "meeting" in subject or "agenda" in body:
+                to = str(email.get("to", "")).lower()
+                has_relevant_subject = "q2" in subject or "review" in subject or "meeting" in subject
+                has_relevant_body = "agenda" in body or "meeting" in body or "q2" in body
+                has_attachment = bool(email.get("attachment"))
+
+                if has_relevant_subject:
+                    email_score = 0.6
+                if has_relevant_subject and has_relevant_body:
+                    email_score = 0.8
+                if has_relevant_subject and has_attachment:
                     email_score = 1.0
                     break
+                if has_relevant_subject and has_relevant_body:
+                    email_score = max(email_score, 0.8)
 
         breakdown["email_sent"] = email_score
 
         # --- edge_case (0.10) ---
-        # Did the agent handle the situation correctly based on slot availability?
-        edge_score = 0.0
         # In hard mode, user_03 is unavailable but a slot still exists for others.
-        # The agent should proceed with available members and optionally note user_03 as unconfirmed.
+        # The agent should proceed with available members and note user_03 as unconfirmed.
+        edge_score = 0.0
 
-        # If meeting was created AND error was handled, full marks
+        # Check if agent mentioned user_03 status in email or agenda
+        mentioned_unavailable = False
+        for email in sent_emails:
+            body = str(email.get("body", "")).lower()
+            if "user_03" in body or "unconfirmed" in body or "unavailable" in body:
+                mentioned_unavailable = True
+                break
+        if agenda_content and ("user_03" in agenda_content.lower() or "unconfirmed" in agenda_content.lower() or "unavailable" in agenda_content.lower()):
+            mentioned_unavailable = True
+
         if meeting_score > 0 and error_score >= 0.7:
-            edge_score = 1.0
+            edge_score = 0.8
+            if mentioned_unavailable:
+                edge_score = 1.0  # Full marks: handled error + noted it
         elif meeting_score > 0 or error_score >= 0.7:
             edge_score = 0.5
+        elif mentioned_unavailable:
+            edge_score = 0.3
 
         breakdown["edge_case"] = edge_score
 

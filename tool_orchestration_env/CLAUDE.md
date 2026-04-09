@@ -139,6 +139,50 @@ Tool states take priority. History is used as fallback when states are empty.
   env via `_get_env()`. The `/grader` endpoint returns the last completed episode's
   grader result from this shared instance.
 
+## Grader Validation Depth
+
+The grader doesn't just check tool presence — it validates:
+
+### SQL Semantic Validation
+- Checks for proper WHERE clauses (not just keyword presence)
+- Verifies query results match expected data (row counts, email sets)
+- Partial credit for correct table but missing filters
+
+### Math Result Verification
+- group_sum results are compared against expected category totals
+- Tolerance of 0.01 for floating point comparison
+- Partial credit scaled by number of correct categories
+
+### Attachment Validation
+- Verifies attachment path matches the actual written file path
+- Tiered scoring: has attachment > reasonable path > any attachment
+
+### Duplicate Detection
+- Easy task penalizes duplicate emails to the same recipient (-0.15 per dup)
+- Environment penalizes duplicate tool calls (same tool+method+params)
+
+### Meeting Time Verification (Hard)
+- Checks if created event matches known free slot (April 3, 10:00-11:00)
+- Tiered: correct start+end > correct start only > event exists
+
+### Agenda Quality (Hard)
+- Checks for specific Q1 review references (v2.0, latency, mobile, Series B)
+- Bonus for reading source material AND referencing specific items
+
+## Contextual Step Rewards
+
+Beyond matching the optimal tool sequence, the environment gives quality bonuses:
+- +0.02 for database queries returning data
+- +0.02 for group_sum producing results
+- +0.02 for successful calendar event creation
+- +0.01 for successful email send / file write
+
+## Task-Specific Inference Hints
+
+`inference.py` provides task-specific strategy guidance on the first step of each
+task via `TASK_HINTS`. This helps the LLM follow the optimal tool sequence without
+hardcoding actions.
+
 ## Pre-Submission Checklist
 
 1. `inference.py` has `API_BASE_URL`, `MODEL_NAME`, `HF_TOKEN` env vars
