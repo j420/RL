@@ -16,7 +16,16 @@ increasingly complex workflows.
 from typing import Any, Dict, List
 
 from openenv.core.env_server.types import Action, Observation, State
-from pydantic import Field
+from pydantic import Field, field_validator
+
+# Evaluation requires all scores/rewards strictly in (0, 1) — never exactly 0.0 or 1.0
+SCORE_MIN = 0.01
+SCORE_MAX = 0.99
+
+
+def clamp_score(v: float) -> float:
+    """Clamp a score to (0, 1) exclusive."""
+    return round(max(SCORE_MIN, min(SCORE_MAX, float(v))), 4)
 
 
 AVAILABLE_TOOLS = [
@@ -89,6 +98,14 @@ class ToolOrchestrationObservation(Observation):
         description="Maximum steps allowed for the current task",
     )
 
+    @field_validator("reward", mode="before")
+    @classmethod
+    def clamp_reward_value(cls, v):
+        """Ensure reward is always strictly between 0 and 1."""
+        if v is None:
+            return SCORE_MIN
+        return clamp_score(float(v))
+
 
 class ToolOrchestrationState(State):
     """Extended state for the Tool Orchestration environment.
@@ -102,7 +119,7 @@ class ToolOrchestrationState(State):
         description="ID of the current task: 'easy', 'medium', or 'hard'",
     )
     total_reward: float = Field(
-        default=0.0,
+        default=0.01,
         description="Accumulated reward for the current episode",
     )
     tools_called: List[str] = Field(

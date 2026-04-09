@@ -114,8 +114,8 @@ def run_episode(
 
     steps_taken = 0
     rewards: List[float] = []
-    prev_reward = 0.0
-    score = 0.0
+    prev_reward = 0.01
+    score = 0.01
     success = False
 
     try:
@@ -148,7 +148,7 @@ def run_episode(
             steps_taken += 1
 
             # Compute per-step reward delta
-            current_reward = result.reward or 0.0
+            current_reward = result.reward or 0.01
             step_reward = current_reward - prev_reward
             rewards.append(step_reward)
             prev_reward = current_reward
@@ -164,7 +164,7 @@ def run_episode(
                 error=error,
             )
 
-        score = result.reward or 0.0
+        score = result.reward or 0.01
         success = score >= SUCCESS_THRESHOLD
 
     finally:
@@ -254,7 +254,7 @@ def main():
                 scores[task_id] = score
             except Exception as e:
                 print(f"[DEBUG] {task_id} error: {e}", flush=True)
-                scores[task_id] = 0.0
+                scores[task_id] = 0.01
 
 
 if __name__ == "__main__":

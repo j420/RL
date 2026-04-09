@@ -129,7 +129,7 @@ class ToolOrchestrationEnvironment(Environment):
             return ToolOrchestrationObservation(
                 tool_response={"error": "Environment not initialized. Call reset() first."},
                 done=True,
-                reward=0.0,
+                reward=0.01,
             )
 
         if self._done:
